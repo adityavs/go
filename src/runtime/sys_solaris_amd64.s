@@ -52,7 +52,7 @@ TEXT runtime·nanotime1(SB),NOSPLIT,$0
 // pipe(3c) wrapper that returns fds in AX, DX.
 // NOT USING GO CALLING CONVENTION.
 TEXT runtime·pipe1(SB),NOSPLIT,$0
-	SUBQ	$16, SP // 8 bytes will do, but stack has to be 16-byte alligned
+	SUBQ	$16, SP // 8 bytes will do, but stack has to be 16-byte aligned
 	MOVQ	SP, DI
 	LEAQ	libc_pipe(SB), AX
 	CALL	AX
@@ -173,15 +173,16 @@ TEXT runtime·sigtramp(SB),NOSPLIT,$0
 	MOVQ	g(BX), R10
 	CMPQ	R10, $0
 	JNE	allgood
+	MOVQ	SI, 80(SP)
+	MOVQ	DX, 88(SP)
+	LEAQ	80(SP), AX
 	MOVQ	DI, 0(SP)
+	MOVQ	AX, 8(SP)
 	MOVQ	$runtime·badsignal(SB), AX
 	CALL	AX
 	JMP	exit
 
 allgood:
-	// save g
-	MOVQ	R10, 80(SP)
-
 	// Save m->libcall and m->scratch. We need to do this because we
 	// might get interrupted by a signal in runtime·asmcgocall.
 
@@ -219,17 +220,11 @@ allgood:
 	MOVL	0(R10), R10
 	MOVQ	R10, 160(SP)
 
-	MOVQ	g(BX), R10
-	// g = m->gsignal
-	MOVQ	m_gsignal(BP), BP
-	MOVQ	BP, g(BX)
-
 	// prepare call
 	MOVQ	DI, 0(SP)
 	MOVQ	SI, 8(SP)
 	MOVQ	DX, 16(SP)
-	MOVQ	R10, 24(SP)
-	CALL	runtime·sighandler(SB)
+	CALL	runtime·sigtrampgo(SB)
 
 	get_tls(BX)
 	MOVQ	g(BX), BP
@@ -267,10 +262,6 @@ allgood:
 	MOVQ	160(SP), R10
 	MOVL	R10, 0(R11)
 
-	// restore g
-	MOVQ	80(SP), R10
-	MOVQ	R10, g(BX)
-
 exit:
 	// restore registers
 	MOVQ	32(SP), BX
@@ -281,6 +272,19 @@ exit:
 	MOVQ	72(SP), R15
 
 	ADDQ    $184, SP
+	RET
+
+TEXT runtime·sigfwd(SB),NOSPLIT,$0-32
+	MOVQ	fn+0(FP),    AX
+	MOVL	sig+8(FP),   DI
+	MOVQ	info+16(FP), SI
+	MOVQ	ctx+24(FP),  DX
+	PUSHQ	BP
+	MOVQ	SP, BP
+	ANDQ	$~15, SP     // alignment for x86_64 ABI
+	CALL	AX
+	MOVQ	BP, SP
+	POPQ	BP
 	RET
 
 // Called from runtime·usleep (Go). Can be called on Go stack, on OS stack,
@@ -335,8 +339,8 @@ TEXT runtime·osyield1(SB),NOSPLIT,$0
 	CALL	AX
 	RET
 
-// func now() (sec int64, nsec int32)
-TEXT time·now(SB),NOSPLIT,$8-12
+// func walltime() (sec int64, nsec int32)
+TEXT runtime·walltime(SB),NOSPLIT,$8-12
 	CALL	runtime·nanotime(SB)
 	MOVQ	0(SP), AX
 

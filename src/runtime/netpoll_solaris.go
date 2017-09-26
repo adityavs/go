@@ -58,7 +58,7 @@ import "unsafe"
 //
 // The open and arming mechanisms are serialized using the lock
 // inside PollDesc. This is required because the netpoll loop runs
-// asynchonously in respect to other Go code and by the time we get
+// asynchronously in respect to other Go code and by the time we get
 // to call port_associate to update the association in the loop, the
 // file descriptor might have been closed and reopened already. The
 // lock allows runtime·netpollupdate to be called synchronously from
@@ -117,15 +117,19 @@ func netpollinit() {
 		return
 	}
 
-	print("netpollinit: failed to create port (", errno(), ")\n")
-	throw("netpollinit: failed to create port")
+	print("runtime: port_create failed (errno=", errno(), ")\n")
+	throw("runtime: netpollinit failed")
+}
+
+func netpolldescriptor() uintptr {
+	return uintptr(portfd)
 }
 
 func netpollopen(fd uintptr, pd *pollDesc) int32 {
 	lock(&pd.lock)
 	// We don't register for any specific type of events yet, that's
 	// netpollarm's job. We merely ensure we call port_associate before
-	// asynchonous connect/accept completes, so when we actually want
+	// asynchronous connect/accept completes, so when we actually want
 	// to do any I/O, the call to port_associate (from netpollarm,
 	// with the interested event set) will unblock port_getn right away
 	// because of the I/O readiness notification.
@@ -154,8 +158,8 @@ func netpollupdate(pd *pollDesc, set, clear uint32) {
 	}
 
 	if events != 0 && port_associate(portfd, _PORT_SOURCE_FD, pd.fd, events, uintptr(unsafe.Pointer(pd))) != 0 {
-		print("netpollupdate: failed to associate (", errno(), ")\n")
-		throw("netpollupdate: failed to associate")
+		print("runtime: port_associate failed (errno=", errno(), ")\n")
+		throw("runtime: netpollupdate failed")
 	}
 	pd.user = events
 }
@@ -169,7 +173,7 @@ func netpollarm(pd *pollDesc, mode int) {
 	case 'w':
 		netpollupdate(pd, _POLLOUT, 0)
 	default:
-		throw("netpollarm: bad mode")
+		throw("runtime: bad mode")
 	}
 	unlock(&pd.lock)
 }
@@ -192,8 +196,8 @@ retry:
 	var n uint32 = 1
 	if port_getn(portfd, &events[0], uint32(len(events)), &n, wait) < 0 {
 		if e := errno(); e != _EINTR {
-			print("runtime: port_getn on fd ", portfd, " failed with ", e, "\n")
-			throw("port_getn failed")
+			print("runtime: port_getn on fd ", portfd, " failed (errno=", e, ")\n")
+			throw("runtime: netpoll failed")
 		}
 		goto retry
 	}

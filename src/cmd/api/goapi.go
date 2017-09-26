@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -26,6 +26,18 @@ import (
 	"sort"
 	"strings"
 )
+
+func goCmd() string {
+	var exeSuffix string
+	if runtime.GOOS == "windows" {
+		exeSuffix = ".exe"
+	}
+	path := filepath.Join(runtime.GOROOT(), "bin", "go"+exeSuffix)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return "go"
+}
 
 // Flags
 var (
@@ -127,7 +139,7 @@ func main() {
 	if flag.NArg() > 0 {
 		pkgNames = flag.Args()
 	} else {
-		stds, err := exec.Command("go", "list", "std").Output()
+		stds, err := exec.Command(goCmd(), "list", "std").Output()
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -143,6 +155,11 @@ func main() {
 		w := NewWalker(context, filepath.Join(build.Default.GOROOT, "src"))
 
 		for _, name := range pkgNames {
+			// Vendored packages do not contribute to our
+			// public API surface.
+			if strings.HasPrefix(name, "vendor/") {
+				continue
+			}
 			// - Package "unsafe" contains special signatures requiring
 			//   extra care when printing them - ignore since it is not
 			//   going to change w/o a language change.
@@ -172,7 +189,7 @@ func main() {
 			features = append(features, f)
 			continue
 		}
-		comma := strings.Index(f, ",")
+		comma := strings.IndexByte(f, ',')
 		for cname := range cmap {
 			f2 := fmt.Sprintf("%s (%s)%s", f[:comma], cname, f[comma:])
 			features = append(features, f2)
@@ -368,15 +385,6 @@ func (w *Walker) parseFile(dir, file string) (*ast.File, error) {
 	return f, nil
 }
 
-func contains(list []string, s string) bool {
-	for _, t := range list {
-		if t == s {
-			return true
-		}
-	}
-	return false
-}
-
 // The package cache doesn't operate correctly in rare (so far artificial)
 // circumstances (issue 8425). Disable before debugging non-obvious errors
 // from the type-checker.
@@ -429,7 +437,7 @@ func (w *Walker) Import(name string) (*types.Package, error) {
 	w.imported[name] = &importing
 
 	root := w.root
-	if strings.HasPrefix(name, "golang.org/x/") {
+	if strings.HasPrefix(name, "golang_org/x/") {
 		root = filepath.Join(root, "vendor")
 	}
 

@@ -16,7 +16,7 @@ import (
 	"unicode/utf8"
 )
 
-// A WordEncoder is a RFC 2047 encoded-word encoder.
+// A WordEncoder is an RFC 2047 encoded-word encoder.
 type WordEncoder byte
 
 const (
@@ -71,7 +71,7 @@ const (
 	maxEncodedWordLen = 75
 	// maxContentLen is how much content can be encoded, ignoring the header and
 	// 2-byte footer.
-	maxContentLen = maxEncodedWordLen - len("=?UTF-8?") - len("?=")
+	maxContentLen = maxEncodedWordLen - len("=?UTF-8?q?") - len("?=")
 )
 
 var maxBase64Len = base64.StdEncoding.DecodedLen(maxContentLen)
@@ -89,7 +89,7 @@ func (e WordEncoder) bEncode(buf *bytes.Buffer, charset, s string) {
 
 	var currentLen, last, runeLen int
 	for i := 0; i < len(s); i += runeLen {
-		// Multi-byte characters must not be split accross encoded-words.
+		// Multi-byte characters must not be split across encoded-words.
 		// See RFC 2047, section 5.3.
 		_, runeLen = utf8.DecodeRuneInString(s[i:])
 
@@ -119,7 +119,7 @@ func (e WordEncoder) qEncode(buf *bytes.Buffer, charset, s string) {
 	var currentLen, runeLen int
 	for i := 0; i < len(s); i += runeLen {
 		b := s[i]
-		// Multi-byte characters must not be split accross encoded-words.
+		// Multi-byte characters must not be split across encoded-words.
 		// See RFC 2047, section 5.3.
 		var encLen int
 		if b >= ' ' && b <= '~' && b != '=' && b != '?' && b != '_' {
@@ -188,27 +188,35 @@ type WordDecoder struct {
 	// charset into UTF-8.
 	// Charsets are always lower-case. utf-8, iso-8859-1 and us-ascii charsets
 	// are handled by default.
-	// One of the the CharsetReader's result values must be non-nil.
+	// One of the CharsetReader's result values must be non-nil.
 	CharsetReader func(charset string, input io.Reader) (io.Reader, error)
 }
 
 // Decode decodes an RFC 2047 encoded-word.
 func (d *WordDecoder) Decode(word string) (string, error) {
-	if !strings.HasPrefix(word, "=?") || !strings.HasSuffix(word, "?=") || strings.Count(word, "?") != 4 {
+	// See https://tools.ietf.org/html/rfc2047#section-2 for details.
+	// Our decoder is permissive, we accept empty encoded-text.
+	if len(word) < 8 || !strings.HasPrefix(word, "=?") || !strings.HasSuffix(word, "?=") || strings.Count(word, "?") != 4 {
 		return "", errInvalidWord
 	}
 	word = word[2 : len(word)-2]
 
 	// split delimits the first 2 fields
 	split := strings.IndexByte(word, '?')
+
+	// split word "UTF-8?q?ascii" into "UTF-8", 'q', and "ascii"
+	charset := word[:split]
+	if len(charset) == 0 {
+		return "", errInvalidWord
+	}
+	if len(word) < split+3 {
+		return "", errInvalidWord
+	}
+	encoding := word[split+1]
 	// the field after split must only be one byte
 	if word[split+2] != '?' {
 		return "", errInvalidWord
 	}
-
-	// split word "UTF-8?q?ascii" into "UTF-8", 'q', and "ascii"
-	charset := word[:split]
-	encoding := word[split+1]
 	text := word[split+3:]
 
 	content, err := decode(encoding, text)
@@ -249,7 +257,7 @@ func (d *WordDecoder) DecodeHeader(header string) (string, error) {
 		}
 		cur := start + len("=?")
 
-		i := strings.Index(header[cur:], "?")
+		i := strings.IndexByte(header[cur:], '?')
 		if i == -1 {
 			break
 		}

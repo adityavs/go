@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Software floating point interpretaton of ARM 7500 FP instructions.
+// Software floating point interpretation of ARM 7500 FP instructions.
 // The interpretation is not bit compatible with the 7500.
 // It uses true little-endian doubles, while the 7500 used mixed-endian.
 
@@ -168,14 +168,15 @@ execute:
 		}
 		return 1
 	}
-	if i == 0xe08bb00d {
-		// add sp to r11.
-		// might be part of a large stack offset address
+	if i&0xfffffff0 == 0xe08bb000 {
+		r := i & 0xf
+		// add r to r11.
+		// might be part of a large offset address calculation
 		// (or might not, but again no harm done).
-		regs[11] += regs[13]
+		regs[11] += regs[r]
 
 		if fptrace > 0 {
-			print("*** cpu R[11] += R[13] ", hex(regs[11]), "\n")
+			print("*** cpu R[11] += R[", r, "] ", hex(regs[11]), "\n")
 		}
 		return 1
 	}
@@ -445,6 +446,23 @@ execute:
 		}
 		return 1
 
+	case 0xeeb10b40: // D[regd] = neg D[regm]
+		m.freglo[regd] = m.freglo[regm]
+		m.freghi[regd] = m.freghi[regm] ^ 1<<31
+
+		if fptrace > 0 {
+			print("*** D[", regd, "] = neg D[", regm, "] ", hex(m.freghi[regd]), "-", hex(m.freglo[regd]), "\n")
+		}
+		return 1
+
+	case 0xeeb10a40: // F[regd] = neg F[regm]
+		m.freglo[regd] = m.freglo[regm] ^ 1<<31
+
+		if fptrace > 0 {
+			print("*** F[", regd, "] = neg F[", regm, "] ", hex(m.freglo[regd]), "\n")
+		}
+		return 1
+
 	case 0xeeb40bc0: // D[regd] :: D[regm] (CMPD)
 		cmp, nan := fcmp64(fgetd(regd), fgetd(regm))
 		m.fflag = fstatus(nan, cmp)
@@ -460,6 +478,24 @@ execute:
 
 		if fptrace > 0 {
 			print("*** cmp F[", regd, "]::F[", regm, "] ", hex(m.fflag), "\n")
+		}
+		return 1
+
+	case 0xeeb50bc0: // D[regd] :: 0 (CMPD)
+		cmp, nan := fcmp64(fgetd(regd), 0)
+		m.fflag = fstatus(nan, cmp)
+
+		if fptrace > 0 {
+			print("*** cmp D[", regd, "]::0 ", hex(m.fflag), "\n")
+		}
+		return 1
+
+	case 0xeeb50ac0: // F[regd] :: 0 (CMPF)
+		cmp, nan := fcmp64(f32to64(m.freglo[regd]), 0)
+		m.fflag = fstatus(nan, cmp)
+
+		if fptrace > 0 {
+			print("*** cmp F[", regd, "]::0 ", hex(m.fflag), "\n")
 		}
 		return 1
 
@@ -529,7 +565,7 @@ execute:
 	case 0xeeb80ac0: // D[regd] = S[regm] (MOVWF)
 		cmp := int32(m.freglo[regm])
 		if cmp < 0 {
-			fputf(regd, f64to32(fintto64(int64(-cmp))))
+			fputf(regd, f64to32(fintto64(-int64(cmp))))
 			m.freglo[regd] ^= 0x80000000
 		} else {
 			fputf(regd, f64to32(fintto64(int64(cmp))))
@@ -551,7 +587,7 @@ execute:
 	case 0xeeb80bc0: // D[regd] = S[regm] (MOVWD)
 		cmp := int32(m.freglo[regm])
 		if cmp < 0 {
-			fputd(regd, fintto64(int64(-cmp)))
+			fputd(regd, fintto64(-int64(cmp)))
 			m.freghi[regd] ^= 0x80000000
 		} else {
 			fputd(regd, fintto64(int64(cmp)))
@@ -609,7 +645,7 @@ func sfloat2(pc uint32, regs *[15]uint32) uint32 {
 			pc = uint32(funcPC(_sfloatpanic))
 			break
 		}
-		pc += 4 * uint32(skip)
+		pc += 4 * skip
 	}
 	if first {
 		print("sfloat2 ", pc, " ", hex(*(*uint32)(unsafe.Pointer(uintptr(pc)))), "\n")
@@ -617,3 +653,12 @@ func sfloat2(pc uint32, regs *[15]uint32) uint32 {
 	}
 	return pc
 }
+
+// Stubs to pacify vet. Not safe to call from Go.
+// Calls to these functions are inserted by the compiler or assembler.
+func _sfloat()
+func udiv()
+func _div()
+func _divu()
+func _mod()
+func _modu()

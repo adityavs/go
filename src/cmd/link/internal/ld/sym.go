@@ -1,6 +1,6 @@
 // Derived from Inferno utils/6l/obj.c and utils/6l/span.c
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/obj.c
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/span.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/obj.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/span.c
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -9,7 +9,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -32,63 +32,39 @@
 package ld
 
 import (
-	"cmd/internal/obj"
+	"cmd/internal/objabi"
+	"cmd/internal/sys"
 	"log"
-	"os"
-	"path/filepath"
-	"strconv"
 )
 
-var headers = []struct {
-	name string
-	val  int
-}{
-	{"darwin", obj.Hdarwin},
-	{"dragonfly", obj.Hdragonfly},
-	{"elf", obj.Helf},
-	{"freebsd", obj.Hfreebsd},
-	{"linux", obj.Hlinux},
-	{"android", obj.Hlinux}, // must be after "linux" entry or else headstr(Hlinux) == "android"
-	{"nacl", obj.Hnacl},
-	{"netbsd", obj.Hnetbsd},
-	{"openbsd", obj.Hopenbsd},
-	{"plan9", obj.Hplan9},
-	{"solaris", obj.Hsolaris},
-	{"windows", obj.Hwindows},
-	{"windowsgui", obj.Hwindows},
+func linknew(arch *sys.Arch) *Link {
+	ctxt := &Link{
+		Syms: &Symbols{
+			hash: []map[string]*Symbol{
+				// preallocate about 2mb for hash of
+				// non static symbols
+				make(map[string]*Symbol, 100000),
+			},
+			Allsym: make([]*Symbol, 0, 100000),
+		},
+		Arch:         arch,
+		LibraryByPkg: make(map[string]*Library),
+	}
+
+	if objabi.GOARCH != arch.Name {
+		log.Fatalf("invalid objabi.GOARCH %s (want %s)", objabi.GOARCH, arch.Name)
+	}
+
+	return ctxt
 }
 
-func linknew(arch *LinkArch) *Link {
-	ctxt := new(Link)
-	ctxt.Hash = make(map[symVer]*LSym)
-	ctxt.Arch = arch
-	ctxt.Version = obj.HistVersion
-	ctxt.Goroot = obj.Getgoroot()
-
-	p := obj.Getgoarch()
-	if p != arch.Name {
-		log.Fatalf("invalid goarch %s (want %s)", p, arch.Name)
-	}
-
-	var buf string
-	buf, _ = os.Getwd()
-	if buf == "" {
-		buf = "/???"
-	}
-	buf = filepath.ToSlash(buf)
-
-	ctxt.Headtype = headtype(obj.Getgoos())
-	if ctxt.Headtype < 0 {
-		log.Fatalf("unknown goos %s", obj.Getgoos())
-	}
-
-	// Record thread-local storage offset.
-	// TODO(rsc): Move tlsoffset back into the linker.
-	switch ctxt.Headtype {
+// computeTLSOffset records the thread-local storage offset.
+func (ctxt *Link) computeTLSOffset() {
+	switch Headtype {
 	default:
-		log.Fatalf("unknown thread-local storage offset for %s", Headstr(ctxt.Headtype))
+		log.Fatalf("unknown thread-local storage offset for %v", Headtype)
 
-	case obj.Hplan9, obj.Hwindows:
+	case objabi.Hplan9, objabi.Hwindows:
 		break
 
 		/*
@@ -96,40 +72,40 @@ func linknew(arch *LinkArch) *Link {
 		 * Translate 0(FS) and 8(FS) into -16(FS) and -8(FS).
 		 * Known to low-level assembly in package runtime and runtime/cgo.
 		 */
-	case obj.Hlinux,
-		obj.Hfreebsd,
-		obj.Hnetbsd,
-		obj.Hopenbsd,
-		obj.Hdragonfly,
-		obj.Hsolaris:
-		if obj.Getgoos() == "android" {
-			switch ctxt.Arch.Thechar {
-			case '6':
+	case objabi.Hlinux,
+		objabi.Hfreebsd,
+		objabi.Hnetbsd,
+		objabi.Hopenbsd,
+		objabi.Hdragonfly,
+		objabi.Hsolaris:
+		if objabi.GOOS == "android" {
+			switch ctxt.Arch.Family {
+			case sys.AMD64:
 				// Android/amd64 constant - offset from 0(FS) to our TLS slot.
 				// Explained in src/runtime/cgo/gcc_android_*.c
 				ctxt.Tlsoffset = 0x1d0
-			case '8':
+			case sys.I386:
 				// Android/386 constant - offset from 0(GS) to our TLS slot.
 				ctxt.Tlsoffset = 0xf8
 			default:
-				ctxt.Tlsoffset = -1 * ctxt.Arch.Ptrsize
+				ctxt.Tlsoffset = -1 * ctxt.Arch.PtrSize
 			}
 		} else {
-			ctxt.Tlsoffset = -1 * ctxt.Arch.Ptrsize
+			ctxt.Tlsoffset = -1 * ctxt.Arch.PtrSize
 		}
 
-	case obj.Hnacl:
-		switch ctxt.Arch.Thechar {
+	case objabi.Hnacl:
+		switch ctxt.Arch.Family {
 		default:
 			log.Fatalf("unknown thread-local storage offset for nacl/%s", ctxt.Arch.Name)
 
-		case '5':
+		case sys.ARM:
 			ctxt.Tlsoffset = 0
 
-		case '6':
+		case sys.AMD64:
 			ctxt.Tlsoffset = 0
 
-		case '8':
+		case sys.I386:
 			ctxt.Tlsoffset = -8
 		}
 
@@ -137,96 +113,23 @@ func linknew(arch *LinkArch) *Link {
 		 * OS X system constants - offset from 0(GS) to our TLS.
 		 * Explained in src/runtime/cgo/gcc_darwin_*.c.
 		 */
-	case obj.Hdarwin:
-		switch ctxt.Arch.Thechar {
+	case objabi.Hdarwin:
+		switch ctxt.Arch.Family {
 		default:
 			log.Fatalf("unknown thread-local storage offset for darwin/%s", ctxt.Arch.Name)
 
-		case '5':
+		case sys.ARM:
 			ctxt.Tlsoffset = 0 // dummy value, not needed
 
-		case '6':
+		case sys.AMD64:
 			ctxt.Tlsoffset = 0x8a0
 
-		case '7':
+		case sys.ARM64:
 			ctxt.Tlsoffset = 0 // dummy value, not needed
 
-		case '8':
+		case sys.I386:
 			ctxt.Tlsoffset = 0x468
 		}
 	}
 
-	// On arm, record goarm.
-	if ctxt.Arch.Thechar == '5' {
-		ctxt.Goarm = obj.Getgoarm()
-	}
-
-	return ctxt
-}
-
-func linknewsym(ctxt *Link, symb string, v int) *LSym {
-	s := new(LSym)
-	*s = LSym{}
-
-	s.Dynid = -1
-	s.Plt = -1
-	s.Got = -1
-	s.Name = symb
-	s.Type = 0
-	s.Version = int16(v)
-	s.Value = 0
-	s.Size = 0
-	ctxt.Nsymbol++
-
-	s.Allsym = ctxt.Allsym
-	ctxt.Allsym = s
-
-	return s
-}
-
-type symVer struct {
-	sym string
-	ver int
-}
-
-func _lookup(ctxt *Link, symb string, v int, creat int) *LSym {
-	s := ctxt.Hash[symVer{symb, v}]
-	if s != nil {
-		return s
-	}
-	if creat == 0 {
-		return nil
-	}
-
-	s = linknewsym(ctxt, symb, v)
-	s.Extname = s.Name
-	ctxt.Hash[symVer{symb, v}] = s
-	return s
-}
-
-func Linklookup(ctxt *Link, name string, v int) *LSym {
-	return _lookup(ctxt, name, v, 1)
-}
-
-// read-only lookup
-func Linkrlookup(ctxt *Link, name string, v int) *LSym {
-	return _lookup(ctxt, name, v, 0)
-}
-
-func Headstr(v int) string {
-	for i := 0; i < len(headers); i++ {
-		if v == headers[i].val {
-			return headers[i].name
-		}
-	}
-	return strconv.Itoa(v)
-}
-
-func headtype(name string) int {
-	for i := 0; i < len(headers); i++ {
-		if name == headers[i].name {
-			return headers[i].val
-		}
-	}
-	return -1
 }

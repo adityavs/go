@@ -1,4 +1,4 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -13,8 +13,6 @@ import (
 	"unicode/utf16"
 	"unsafe"
 )
-
-//go:generate go run mksyscall_windows.go -output zsyscall_windows.go syscall_windows.go security_windows.go
 
 type Handle uintptr
 
@@ -59,7 +57,7 @@ func UTF16ToString(s []uint16) string {
 
 // StringToUTF16Ptr returns pointer to the UTF-16 encoding of
 // the UTF-8 string s, with a terminating NUL added. If s
-// If s contains a NUL byte this function panics instead of
+// contains a NUL byte this function panics instead of
 // returning an error.
 //
 // Deprecated: Use UTF16PtrFromString instead.
@@ -75,8 +73,6 @@ func UTF16PtrFromString(s string) (*uint16, error) {
 	}
 	return &a[0], nil
 }
-
-func Getpagesize() int { return 4096 }
 
 // Errno is the Windows error number.
 type Errno uintptr
@@ -114,7 +110,7 @@ func (e Errno) Error() string {
 }
 
 func (e Errno) Temporary() bool {
-	return e == EINTR || e == EMFILE || e.Timeout()
+	return e == EINTR || e == EMFILE || e == WSAECONNABORTED || e == WSAECONNRESET || e.Timeout()
 }
 
 func (e Errno) Timeout() bool {
@@ -240,7 +236,8 @@ func NewCallbackCDecl(fn interface{}) uintptr {
 
 // syscall interface implementation for other packages
 
-func Exit(code int) { ExitProcess(uint32(code)) }
+// Implemented in ../runtime/syscall_windows.go.
+func Exit(code int)
 
 func makeInheritSa() *SecurityAttributes {
 	var sa SecurityAttributes
@@ -352,7 +349,7 @@ func Seek(fd Handle, offset int64, whence int) (newoffset int64, err error) {
 	// use GetFileType to check pipe, pipe can't do seek
 	ft, _ := GetFileType(fd)
 	if ft == FILE_TYPE_PIPE {
-		return 0, EPIPE
+		return 0, ESPIPE
 	}
 	rlo, e := SetFilePointer(fd, lo, &hi, w)
 	if e != nil {
@@ -1028,11 +1025,31 @@ func Readlink(path string, buf []byte) (n int, err error) {
 	case IO_REPARSE_TAG_SYMLINK:
 		data := (*symbolicLinkReparseBuffer)(unsafe.Pointer(&rdb.reparseBuffer))
 		p := (*[0xffff]uint16)(unsafe.Pointer(&data.PathBuffer[0]))
-		s = UTF16ToString(p[data.PrintNameOffset/2 : (data.PrintNameLength-data.PrintNameOffset)/2])
+		s = UTF16ToString(p[data.SubstituteNameOffset/2 : (data.SubstituteNameOffset+data.SubstituteNameLength)/2])
+		if data.Flags&_SYMLINK_FLAG_RELATIVE == 0 {
+			if len(s) >= 4 && s[:4] == `\??\` {
+				s = s[4:]
+				switch {
+				case len(s) >= 2 && s[1] == ':': // \??\C:\foo\bar
+					// do nothing
+				case len(s) >= 4 && s[:4] == `UNC\`: // \??\UNC\foo\bar
+					s = `\\` + s[4:]
+				default:
+					// unexpected; do nothing
+				}
+			} else {
+				// unexpected; do nothing
+			}
+		}
 	case _IO_REPARSE_TAG_MOUNT_POINT:
 		data := (*mountPointReparseBuffer)(unsafe.Pointer(&rdb.reparseBuffer))
 		p := (*[0xffff]uint16)(unsafe.Pointer(&data.PathBuffer[0]))
-		s = UTF16ToString(p[data.PrintNameOffset/2 : (data.PrintNameLength-data.PrintNameOffset)/2])
+		s = UTF16ToString(p[data.SubstituteNameOffset/2 : (data.SubstituteNameOffset+data.SubstituteNameLength)/2])
+		if len(s) >= 4 && s[:4] == `\??\` { // \??\C:\foo\bar
+			s = s[4:]
+		} else {
+			// unexpected; do nothing
+		}
 	default:
 		// the path is not a symlink or junction but another type of reparse
 		// point

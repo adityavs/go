@@ -1,4 +1,4 @@
-// Copyright 2013 The Go Authors.  All rights reserved.
+// Copyright 2013 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -7,9 +7,10 @@
 package objfile
 
 import (
+	"debug/dwarf"
 	"debug/macho"
 	"fmt"
-	"os"
+	"io"
 	"sort"
 )
 
@@ -19,7 +20,7 @@ type machoFile struct {
 	macho *macho.File
 }
 
-func openMacho(r *os.File) (rawFile, error) {
+func openMacho(r io.ReaderAt) (rawFile, error) {
 	f, err := macho.NewFile(r)
 	if err != nil {
 		return nil, err
@@ -29,7 +30,7 @@ func openMacho(r *os.File) (rawFile, error) {
 
 func (f *machoFile) symbols() ([]Sym, error) {
 	if f.macho.Symtab == nil {
-		return nil, fmt.Errorf("missing symbol table")
+		return nil, nil
 	}
 
 	// Build sorted list of addresses of all symbols.
@@ -123,3 +124,11 @@ type uint64s []uint64
 func (x uint64s) Len() int           { return len(x) }
 func (x uint64s) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
 func (x uint64s) Less(i, j int) bool { return x[i] < x[j] }
+
+func (f *machoFile) loadAddress() (uint64, error) {
+	return 0, fmt.Errorf("unknown load address")
+}
+
+func (f *machoFile) dwarf() (*dwarf.Data, error) {
+	return f.macho.DWARF()
+}

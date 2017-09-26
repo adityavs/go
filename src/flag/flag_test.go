@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -413,5 +414,35 @@ func TestPrintDefaults(t *testing.T) {
 	got := buf.String()
 	if got != defaultOutput {
 		t.Errorf("got %q want %q\n", got, defaultOutput)
+	}
+}
+
+// Issue 19230: validate range of Int and Uint flag values.
+func TestIntFlagOverflow(t *testing.T) {
+	if strconv.IntSize != 32 {
+		return
+	}
+	ResetForTesting(nil)
+	Int("i", 0, "")
+	Uint("u", 0, "")
+	if err := Set("i", "2147483648"); err == nil {
+		t.Error("unexpected success setting Int")
+	}
+	if err := Set("u", "4294967296"); err == nil {
+		t.Error("unexpected success setting Uint")
+	}
+}
+
+// Issue 20998: Usage should respect CommandLine.output.
+func TestUsageOutput(t *testing.T) {
+	ResetForTesting(DefaultUsage)
+	var buf bytes.Buffer
+	CommandLine.SetOutput(&buf)
+	defer func(old []string) { os.Args = old }(os.Args)
+	os.Args = []string{"app", "-i=1", "-unknown"}
+	Parse()
+	const want = "flag provided but not defined: -i\nUsage of app:\n"
+	if got := buf.String(); got != want {
+		t.Errorf("output = %q; want %q", got, want)
 	}
 }

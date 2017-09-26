@@ -733,7 +733,7 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 
 	case *ast.FuncLit:
 		p.expr(x.Type)
-		p.adjBlock(p.distanceFrom(x.Type.Pos()), blank, x.Body)
+		p.funcBody(p.distanceFrom(x.Type.Pos()), blank, x.Body)
 
 	case *ast.ParenExpr:
 		if _, hasParens := x.X.(*ast.ParenExpr); hasParens {
@@ -825,6 +825,7 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 		if x.Type != nil {
 			p.expr1(x.Type, token.HighestPrec, depth)
 		}
+		p.level++
 		p.print(x.Lbrace, token.LBRACE)
 		p.exprList(x.Lbrace, x.Elts, 1, commaTerm, x.Rbrace)
 		// do not insert extra line break following a /*-style comment
@@ -837,6 +838,7 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 			mode |= noExtraBlank
 		}
 		p.print(mode, x.Rbrace, token.RBRACE, mode)
+		p.level--
 
 	case *ast.Ellipsis:
 		p.print(token.ELLIPSIS)
@@ -885,8 +887,6 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 	default:
 		panic("unreachable")
 	}
-
-	return
 }
 
 func (p *printer) possibleSelectorExpr(expr ast.Expr, prec1, depth int) bool {
@@ -1266,8 +1266,6 @@ func (p *printer) stmt(stmt ast.Stmt, nextIsRBrace bool) {
 	default:
 		panic("unreachable")
 	}
-
-	return
 }
 
 // ----------------------------------------------------------------------------
@@ -1445,6 +1443,9 @@ func (p *printer) spec(spec ast.Spec, n int, doIndent bool) {
 		} else {
 			p.print(vtab)
 		}
+		if s.Assign.IsValid() {
+			p.print(token.ASSIGN, blank)
+		}
 		p.expr(s.Type)
 		p.setComment(s.Comment)
 
@@ -1531,6 +1532,16 @@ func (p *printer) nodeSize(n ast.Node, maxSize int) (size int) {
 	return
 }
 
+// numLines returns the number of lines spanned by node n in the original source.
+func (p *printer) numLines(n ast.Node) int {
+	if from := n.Pos(); from.IsValid() {
+		if to := n.End(); to.IsValid() {
+			return p.lineFor(to) - p.lineFor(from) + 1
+		}
+	}
+	return infinity
+}
+
 // bodySize is like nodeSize but it is specialized for *ast.BlockStmt's.
 func (p *printer) bodySize(b *ast.BlockStmt, maxSize int) int {
 	pos1 := b.Pos()
@@ -1557,17 +1568,22 @@ func (p *printer) bodySize(b *ast.BlockStmt, maxSize int) int {
 	return bodySize
 }
 
-// adjBlock prints an "adjacent" block (e.g., a for-loop or function body) following
-// a header (e.g., a for-loop control clause or function signature) of given headerSize.
+// funcBody prints a function body following a function header of given headerSize.
 // If the header's and block's size are "small enough" and the block is "simple enough",
 // the block is printed on the current line, without line breaks, spaced from the header
 // by sep. Otherwise the block's opening "{" is printed on the current line, followed by
 // lines for the block's statements and its closing "}".
 //
-func (p *printer) adjBlock(headerSize int, sep whiteSpace, b *ast.BlockStmt) {
+func (p *printer) funcBody(headerSize int, sep whiteSpace, b *ast.BlockStmt) {
 	if b == nil {
 		return
 	}
+
+	// save/restore composite literal nesting level
+	defer func(level int) {
+		p.level = level
+	}(p.level)
+	p.level = 0
 
 	const maxSize = 100
 	if headerSize+p.bodySize(b, maxSize) <= maxSize {
@@ -1613,7 +1629,7 @@ func (p *printer) funcDecl(d *ast.FuncDecl) {
 	}
 	p.expr(d.Name)
 	p.signature(d.Type.Params, d.Type.Results)
-	p.adjBlock(p.distanceFrom(d.Pos()), vtab, d.Body)
+	p.funcBody(p.distanceFrom(d.Pos()), vtab, d.Body)
 }
 
 func (p *printer) decl(decl ast.Decl) {
@@ -1662,7 +1678,9 @@ func (p *printer) declList(list []ast.Decl) {
 			if prev != tok || getDoc(d) != nil {
 				min = 2
 			}
-			p.linebreak(p.lineFor(d.Pos()), min, ignore, false)
+			// start a new section if the next declaration is a function
+			// that spans multiple lines (see also issue #19544)
+			p.linebreak(p.lineFor(d.Pos()), min, ignore, tok == token.FUNC && p.numLines(d) > 1)
 		}
 		p.decl(d)
 	}

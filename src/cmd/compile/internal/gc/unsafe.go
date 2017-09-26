@@ -4,160 +4,71 @@
 
 package gc
 
-import "cmd/internal/obj"
-
-// look for
-//	unsafe.Sizeof
-//	unsafe.Offsetof
-//	unsafe.Alignof
-// rewrite with a constant
-func unsafenmagic(nn *Node) *Node {
-	fn := nn.Left
-	args := nn.List
-
-	if safemode != 0 || fn == nil || fn.Op != ONAME {
-		return nil
-	}
-	s := fn.Sym
-	if s == nil {
-		return nil
-	}
-	if s.Pkg != unsafepkg {
-		return nil
-	}
-
-	if args == nil {
-		Yyerror("missing argument for %v", s)
-		return nil
-	}
-
-	r := args.N
-
-	var v int64
-	if s.Name == "Sizeof" {
-		typecheck(&r, Erv)
-		defaultlit(&r, nil)
-		tr := r.Type
+// evalunsafe evaluates a package unsafe operation and returns the result.
+func evalunsafe(n *Node) int64 {
+	switch n.Op {
+	case OALIGNOF, OSIZEOF:
+		n.Left = typecheck(n.Left, Erv)
+		n.Left = defaultlit(n.Left, nil)
+		tr := n.Left.Type
 		if tr == nil {
-			goto bad
+			yyerror("invalid expression %v", n)
+			return 0
 		}
 		dowidth(tr)
-		v = tr.Width
-		goto yes
-	}
+		if n.Op == OALIGNOF {
+			return int64(tr.Align)
+		}
+		return tr.Width
 
-	if s.Name == "Offsetof" {
+	case OOFFSETOF:
 		// must be a selector.
-		if r.Op != OXDOT {
-			goto bad
+		if n.Left.Op != OXDOT {
+			yyerror("invalid expression %v", n)
+			return 0
 		}
 
 		// Remember base of selector to find it back after dot insertion.
 		// Since r->left may be mutated by typechecking, check it explicitly
 		// first to track it correctly.
-		typecheck(&r.Left, Erv)
+		n.Left.Left = typecheck(n.Left.Left, Erv)
+		base := n.Left.Left
 
-		base := r.Left
-		typecheck(&r, Erv)
-		switch r.Op {
+		n.Left = typecheck(n.Left, Erv)
+		switch n.Left.Op {
 		case ODOT, ODOTPTR:
 			break
-
 		case OCALLPART:
-			Yyerror("invalid expression %v: argument is a method value", nn)
-			v = 0
-			goto ret
-
+			yyerror("invalid expression %v: argument is a method value", n)
+			return 0
 		default:
-			goto bad
+			yyerror("invalid expression %v", n)
+			return 0
 		}
 
-		v = 0
-
-		// add offsets for inserted dots.
-		var r1 *Node
-		for r1 = r; r1.Left != base; r1 = r1.Left {
-			switch r1.Op {
-			case ODOT:
-				v += r1.Xoffset
-
+		// Sum offsets for dots until we reach base.
+		var v int64
+		for r := n.Left; r != base; r = r.Left {
+			switch r.Op {
 			case ODOTPTR:
-				Yyerror("invalid expression %v: selector implies indirection of embedded %v", nn, r1.Left)
-				goto ret
-
+				// For Offsetof(s.f), s may itself be a pointer,
+				// but accessing f must not otherwise involve
+				// indirection via embedded pointer types.
+				if r.Left != base {
+					yyerror("invalid expression %v: selector implies indirection of embedded %v", n, r.Left)
+					return 0
+				}
+				fallthrough
+			case ODOT:
+				v += r.Xoffset
 			default:
-				Dump("unsafenmagic", r)
-				Fatalf("impossible %v node after dot insertion", Oconv(int(r1.Op), obj.FmtSharp))
-				goto bad
+				Dump("unsafenmagic", n.Left)
+				Fatalf("impossible %#v node after dot insertion", r.Op)
 			}
 		}
-
-		v += r1.Xoffset
-		goto yes
+		return v
 	}
 
-	if s.Name == "Alignof" {
-		typecheck(&r, Erv)
-		defaultlit(&r, nil)
-		tr := r.Type
-		if tr == nil {
-			goto bad
-		}
-
-		// make struct { byte; T; }
-		t := typ(TSTRUCT)
-
-		t.Type = typ(TFIELD)
-		t.Type.Type = Types[TUINT8]
-		t.Type.Down = typ(TFIELD)
-		t.Type.Down.Type = tr
-
-		// compute struct widths
-		dowidth(t)
-
-		// the offset of T is its required alignment
-		v = t.Type.Down.Width
-
-		goto yes
-	}
-
-	return nil
-
-bad:
-	Yyerror("invalid expression %v", nn)
-	v = 0
-	goto ret
-
-yes:
-	if args.Next != nil {
-		Yyerror("extra arguments for %v", s)
-	}
-
-	// any side effects disappear; ignore init
-ret:
-	var val Val
-	val.U = new(Mpint)
-	Mpmovecfix(val.U.(*Mpint), v)
-	n := Nod(OLITERAL, nil, nil)
-	n.Orig = nn
-	n.SetVal(val)
-	n.Type = Types[TUINTPTR]
-	nn.Type = Types[TUINTPTR]
-	return n
-}
-
-func isunsafebuiltin(n *Node) bool {
-	if n == nil || n.Op != ONAME || n.Sym == nil || n.Sym.Pkg != unsafepkg {
-		return false
-	}
-	if n.Sym.Name == "Sizeof" {
-		return true
-	}
-	if n.Sym.Name == "Offsetof" {
-		return true
-	}
-	if n.Sym.Name == "Alignof" {
-		return true
-	}
-	return false
+	Fatalf("unexpected op %v", n.Op)
+	return 0
 }

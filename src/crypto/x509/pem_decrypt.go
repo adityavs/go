@@ -42,7 +42,7 @@ type rfc1423Algo struct {
 }
 
 // rfc1423Algos holds a slice of the possible ways to encrypt a PEM
-// block.  The ivSize numbers were taken from the OpenSSL source.
+// block. The ivSize numbers were taken from the OpenSSL source.
 var rfc1423Algos = []rfc1423Algo{{
 	cipher:     PEMCipherDES,
 	name:       "DES-CBC",
@@ -118,7 +118,7 @@ func DecryptPEMBlock(b *pem.Block, password []byte) ([]byte, error) {
 		return nil, errors.New("x509: no DEK-Info header in block")
 	}
 
-	idx := strings.Index(dek, ",")
+	idx := strings.IndexByte(dek, ',')
 	if idx == -1 {
 		return nil, errors.New("x509: malformed DEK-Info header")
 	}

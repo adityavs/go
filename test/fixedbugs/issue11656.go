@@ -1,6 +1,6 @@
 // run
 
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -61,10 +61,12 @@ func f(n int) {
 		binary.BigEndian.PutUint32(ill, 0x7fe00008) // trap
 	case "ppc64le":
 		binary.LittleEndian.PutUint32(ill, 0x7fe00008) // trap
-	case "mips64":
+	case "mips", "mips64":
 		binary.BigEndian.PutUint32(ill, 0x00000034) // trap
-	case "mips64le":
+	case "mipsle", "mips64le":
 		binary.LittleEndian.PutUint32(ill, 0x00000034) // trap
+	case "s390x":
+		binary.BigEndian.PutUint32(ill, 0) // undefined instruction
 	default:
 		// Just leave it as 0 and hope for the best.
 	}

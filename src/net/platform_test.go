@@ -5,6 +5,7 @@
 package net
 
 import (
+	"internal/testenv"
 	"os"
 	"runtime"
 	"strings"
@@ -49,11 +50,11 @@ func testableNetwork(network string) bool {
 	}
 	switch ss[0] {
 	case "tcp4", "udp4", "ip4":
-		if !supportsIPv4 {
+		if !supportsIPv4() {
 			return false
 		}
 	case "tcp6", "udp6", "ip6":
-		if !supportsIPv6 {
+		if !supportsIPv6() {
 			return false
 		}
 	}
@@ -110,31 +111,31 @@ func testableListenArgs(network, address, client string) bool {
 	}
 
 	// Test wildcard IP addresses.
-	if wildcard && (testing.Short() || !*testExternal) {
+	if wildcard && !testenv.HasExternalNetwork() {
 		return false
 	}
 
 	// Test functionality of IPv4 communication using AF_INET and
 	// IPv6 communication using AF_INET6 sockets.
-	if !supportsIPv4 && ip.To4() != nil {
+	if !supportsIPv4() && ip.To4() != nil {
 		return false
 	}
-	if !supportsIPv6 && ip.To16() != nil && ip.To4() == nil {
+	if !supportsIPv6() && ip.To16() != nil && ip.To4() == nil {
 		return false
 	}
 	cip := ParseIP(client)
 	if cip != nil {
-		if !supportsIPv4 && cip.To4() != nil {
+		if !supportsIPv4() && cip.To4() != nil {
 			return false
 		}
-		if !supportsIPv6 && cip.To16() != nil && cip.To4() == nil {
+		if !supportsIPv6() && cip.To16() != nil && cip.To4() == nil {
 			return false
 		}
 	}
 
 	// Test functionality of IPv4 communication using AF_INET6
 	// sockets.
-	if !supportsIPv4map && supportsIPv4 && (network == "tcp" || network == "udp" || network == "ip") && wildcard {
+	if !supportsIPv4map() && supportsIPv4() && (network == "tcp" || network == "udp" || network == "ip") && wildcard {
 		// At this point, we prefer IPv4 when ip is nil.
 		// See favoriteAddrFamily for further information.
 		if ip.To16() != nil && ip.To4() == nil && cip.To4() != nil { // a pair of IPv6 server and IPv4 client

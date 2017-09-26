@@ -25,7 +25,7 @@ TEXT ·Loadp(SB),NOSPLIT,$-8-16
 	MOVD	R0, ret+8(FP)
 	RET
 
-TEXT runtime∕internal∕atomic·Storep1(SB), NOSPLIT, $0-16
+TEXT runtime∕internal∕atomic·StorepNoWB(SB), NOSPLIT, $0-16
 	B	runtime∕internal∕atomic·Store64(SB)
 
 TEXT runtime∕internal∕atomic·Store(SB), NOSPLIT, $0-12
@@ -111,3 +111,22 @@ again:
 
 TEXT runtime∕internal∕atomic·Xchguintptr(SB), NOSPLIT, $0-24
 	B	runtime∕internal∕atomic·Xchg64(SB)
+
+TEXT ·And8(SB), NOSPLIT, $0-9
+	MOVD	ptr+0(FP), R0
+	MOVB	val+8(FP), R1
+	LDAXRB	(R0), R2
+	AND	R1, R2
+	STLXRB	R2, (R0), R3
+	CBNZ	R3, -3(PC)
+	RET
+
+TEXT ·Or8(SB), NOSPLIT, $0-9
+	MOVD	ptr+0(FP), R0
+	MOVB	val+8(FP), R1
+	LDAXRB	(R0), R2
+	ORR	R1, R2
+	STLXRB	R2, (R0), R3
+	CBNZ	R3, -3(PC)
+	RET
+

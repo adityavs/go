@@ -32,13 +32,13 @@ TEXT runtime∕internal∕atomic·Loaduint(SB), NOSPLIT, $0-8
 TEXT runtime∕internal∕atomic·Storeuintptr(SB), NOSPLIT, $0-8
 	JMP	runtime∕internal∕atomic·Store(SB)
 
-TEXT runtime∕internal∕atomic·Xadduintptr(SB), NOSPLIT, $0-8
+TEXT runtime∕internal∕atomic·Xadduintptr(SB), NOSPLIT, $0-12
 	JMP runtime∕internal∕atomic·Xadd(SB)
 
-TEXT runtime∕internal∕atomic·Loadint64(SB), NOSPLIT, $0-16
+TEXT runtime∕internal∕atomic·Loadint64(SB), NOSPLIT, $0-12
 	JMP runtime∕internal∕atomic·Load64(SB)
 
-TEXT runtime∕internal∕atomic·Xaddint64(SB), NOSPLIT, $0-16
+TEXT runtime∕internal∕atomic·Xaddint64(SB), NOSPLIT, $0-20
 	JMP runtime∕internal∕atomic·Xadd64(SB)
 
 
@@ -52,6 +52,9 @@ TEXT runtime∕internal∕atomic·Xaddint64(SB), NOSPLIT, $0-16
 //	}
 TEXT runtime∕internal∕atomic·Cas64(SB), NOSPLIT, $0-21
 	MOVL	ptr+0(FP), BP
+	TESTL	$7, BP
+	JZ	2(PC)
+	MOVL	0, BP // crash with nil ptr deref
 	MOVL	old_lo+4(FP), AX
 	MOVL	old_hi+8(FP), DX
 	MOVL	new_lo+12(FP), BX
@@ -61,7 +64,7 @@ TEXT runtime∕internal∕atomic·Cas64(SB), NOSPLIT, $0-21
 	SETEQ	ret+20(FP)
 	RET
 
-// bool Casp(void **p, void *old, void *new)
+// bool Casp1(void **p, void *old, void *new)
 // Atomically:
 //	if(*p == old){
 //		*p = new;
@@ -102,7 +105,7 @@ TEXT runtime∕internal∕atomic·Xchguintptr(SB), NOSPLIT, $0-12
 	JMP	runtime∕internal∕atomic·Xchg(SB)
 
 
-TEXT runtime∕internal∕atomic·Storep1(SB), NOSPLIT, $0-8
+TEXT runtime∕internal∕atomic·StorepNoWB(SB), NOSPLIT, $0-8
 	MOVL	ptr+0(FP), BX
 	MOVL	val+4(FP), AX
 	XCHGL	AX, 0(BX)

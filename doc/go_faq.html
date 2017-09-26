@@ -98,7 +98,7 @@ What's the origin of the mascot?</h3>
 <p>
 The mascot and logo were designed by
 <a href="http://reneefrench.blogspot.com">Renée French</a>, who also designed
-<a href="http://plan9.bell-labs.com/plan9/glenda.html">Glenda</a>,
+<a href="https://9p.io/plan9/glenda.html">Glenda</a>,
 the Plan 9 bunny.
 The <a href="https://blog.golang.org/gopher">gopher</a>
 is derived from one she used for an <a href="http://wfmu.org/">WFMU</a>
@@ -271,6 +271,27 @@ you will need to abide by the guidelines at
 
 <h2 id="Design">Design</h2>
 
+<h3 id="runtime">
+Does Go have a runtime?</h3>
+
+<p>
+Go does have an extensive library, called the <em>runtime</em>,
+that is part of every Go program.
+The runtime library implements garbage collection, concurrency,
+stack management, and other critical features of the Go language.
+Although it is more central to the language, Go's runtime is analogous
+to <code>libc</code>, the C library.
+</p>
+
+<p>
+It is important to understand, however, that Go's runtime does not
+include a virtual machine, such as is provided by the Java runtime.
+Go programs are compiled ahead of time to native machine code.
+Thus, although the term is often used to describe the virtual
+environment in which a program runs, in Go the word &ldquo;runtime&rdquo;
+is just the name given to the library providing critical language services.
+</p>
+
 <h3 id="unicode_identifiers">
 What's up with Unicode identifiers?</h3>
 
@@ -335,7 +356,10 @@ code that does what generics would enable, if less smoothly.
 </p>
 
 <p>
-This remains an open issue.
+The topic remains open.
+For a look at several previous unsuccessful attempts to
+design a good generics solution for Go, see
+<a href="https://golang.org/issue/15292">this proposal</a>.
 </p>
 
 <h3 id="exceptions">
@@ -745,6 +769,29 @@ for i, v := range t {
 }
 </pre>
 
+<h3 id="convert_slice_with_same_underlying_type">
+Can I convert []T1 to []T2 if T1 and T2 have the same underlying type?</h3>
+
+This last line of this code sample does not compile.
+
+<pre>
+type T1 int
+type T2 int
+var t1 T1
+var x = T2(t1) // OK
+var st1 []T1
+var sx = ([]T2)(st1) // NOT OK
+</pre>
+
+<p>
+In Go, types are closely tied to methods, in that every named type has
+a (possibly empty) method set.
+The general rule is that you can change the name of the type being
+converted (and thus possibly change its method set) but you can't
+change the name (and method set) of elements of a composite type.
+Go requires you to be explicit about type conversions.
+</p>
+
 <h3 id="nil_error">
 Why is my nil error value not equal to nil?
 </h3>
@@ -865,6 +912,7 @@ Why does Go not have covariant result types?</h3>
 
 <p>
 Covariant result types would mean that an interface like
+</p>
 
 <pre>
 type Copyable interface {
@@ -872,13 +920,15 @@ type Copyable interface {
 }
 </pre>
 
+<p>
 would be satisfied by the method
+</p>
 
 <pre>
 func (v Value) Copy() Value
 </pre>
 
-because <code>Value</code> implements the empty interface.
+<p>because <code>Value</code> implements the empty interface.
 In Go method types must match exactly, so <code>Value</code> does not
 implement <code>Copyable</code>.
 Go separates the notion of what a
@@ -1044,7 +1094,7 @@ it's easy to work around this. For GitHub, try one of these solutions:
 <ul>
 <li>Manually clone the repository in the expected package directory:
 <pre>
-$ cd $GOPATH/src/github.com/username
+$ cd src/github.com/username
 $ git clone git@github.com:username/package.git
 </pre>
 </li>
@@ -1090,12 +1140,19 @@ program is one tool to help automate this process.
 </p>
 
 <p>
-The Go 1.5 release includes an experimental facility to the
+The Go 1.5 release added a facility to the
 <a href="https://golang.org/cmd/go">go</a> command
 that makes it easier to manage external dependencies by "vendoring"
 them into a special directory near the package that depends upon them.
 See the <a href="https://golang.org/s/go15vendor">design
 document</a> for details.
+</p>
+
+<p>
+Work is underway on an experimental package management tool,
+<a href="https://github.com/golang/dep"><code>dep</code></a>, to learn
+more about how tooling can help package management. More information can be found in
+<a href="https://github.com/golang/dep/blob/master/FAQ.md">the <code>dep</code> FAQ</a>.
 </p>
 
 <h2 id="Pointers">Pointers and Allocation</h2>
@@ -1122,6 +1179,12 @@ makes a copy of the thing stored in the interface value.  If the interface
 value holds a struct, copying the interface value makes a copy of the
 struct.  If the interface value holds a pointer, copying the interface value
 makes a copy of the pointer, but again not the data it points to.
+</p>
+
+<p>
+Note that this discussion is about the semantics of the operations.
+Actual implementations may apply optimizations to avoid copying
+as long as the optimizations do not change the semantics.
 </p>
 
 <h3 id="pointer_to_interface">
@@ -1259,11 +1322,26 @@ size of value should use an explicitly sized type, like <code>int64</code>.
 Prior to Go 1.1, the 64-bit Go compilers (both gc and gccgo) used
 a 32-bit representation for <code>int</code>. As of Go 1.1 they use
 a 64-bit representation.
+</p>
+
+<p>
 On the other hand, floating-point scalars and complex
-numbers are always sized: <code>float32</code>, <code>complex64</code>,
-etc., because programmers should be aware of precision when using
-floating-point numbers.
-The default size of a floating-point constant is <code>float64</code>.
+types are always sized (there are no <code>float</code> or <code>complex</code> basic types),
+because programmers should be aware of precision when using floating-point numbers.
+The default type used for an (untyped) floating-point constant is <code>float64</code>.
+Thus <code>foo</code> <code>:=</code> <code>3.0</code> declares a variable <code>foo</code>
+of type <code>float64</code>.
+For a <code>float32</code> variable initialized by an (untyped) constant, the variable type
+must be specified explicitly in the variable declaration:
+</p>
+
+<pre>
+var foo float32 = 3.0
+</pre>
+
+<p>
+Alternatively, the constant must be given a type with a conversion as in
+<code>foo := float32(3.0)</code>.
 </p>
 
 <h3 id="stack_or_heap">
@@ -1667,8 +1745,7 @@ What compiler technology is used to build the compilers?</h3>
 
 <p>
 <code>Gccgo</code> has a front end written in C++, with a recursive descent parser coupled to the
-standard GCC back end. <code>Gc</code> is written in Go using
-<code>yacc</code>/<code>bison</code> for the parser
+standard GCC back end. <code>Gc</code> is written in Go with a recursive descent parser
 and uses a custom loader, also written in Go but
 based on the Plan 9 loader, to generate ELF/Mach-O/PE binaries.
 </p>
@@ -1729,7 +1806,7 @@ A simple C "hello, world" program compiled and linked statically using gcc
 on Linux is around 750 kB,
 including an implementation of <code>printf</code>.
 An equivalent Go program using <code>fmt.Printf</code>
-is around 2.3 MB, but
+is around 1.5 MB, but
 that includes more powerful run-time support and type information.
 </p>
 
@@ -1806,15 +1883,16 @@ Why does Go perform badly on benchmark X?</h3>
 <p>
 One of Go's design goals is to approach the performance of C for comparable
 programs, yet on some benchmarks it does quite poorly, including several
-in <a href="/test/bench/shootout/">test/bench/shootout</a>. The slowest depend on libraries
-for which versions of comparable performance are not available in Go.
-For instance, <a href="/test/bench/shootout/pidigits.go">pidigits.go</a>
+in <a href="https://go.googlesource.com/exp/+/master/shootout/">golang.org/x/exp/shootout</a>.
+The slowest depend on libraries for which versions of comparable performance
+are not available in Go.
+For instance, <a href="https://go.googlesource.com/exp/+/master/shootout/pidigits.go">pidigits.go</a>
 depends on a multi-precision math package, and the C
 versions, unlike Go's, use <a href="http://gmplib.org/">GMP</a> (which is
 written in optimized assembler).
 Benchmarks that depend on regular expressions
-(<a href="/test/bench/shootout/regex-dna.go">regex-dna.go</a>, for instance) are
-essentially comparing Go's native <a href="/pkg/regexp">regexp package</a> to
+(<a href="https://go.googlesource.com/exp/+/master/shootout/regex-dna.go">regex-dna.go</a>,
+for instance) are essentially comparing Go's native <a href="/pkg/regexp">regexp package</a> to
 mature, highly optimized regular expression libraries like PCRE.
 </p>
 
@@ -1822,9 +1900,9 @@ mature, highly optimized regular expression libraries like PCRE.
 Benchmark games are won by extensive tuning and the Go versions of most
 of the benchmarks need attention.  If you measure comparable C
 and Go programs
-(<a href="/test/bench/shootout/reverse-complement.go">reverse-complement.go</a> is one example), you'll see the two
-languages are much closer in raw performance than this suite would
-indicate.
+(<a href="https://go.googlesource.com/exp/+/master/shootout/reverse-complement.go">reverse-complement.go</a>
+is one example), you'll see the two languages are much closer in raw performance
+than this suite would indicate.
 </p>
 
 <p>

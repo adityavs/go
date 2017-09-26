@@ -12,7 +12,7 @@
 // sigsend is called by the signal handler to queue a new signal.
 // signal_recv is called by the Go program to receive a newly queued signal.
 // Synchronization between sigsend and signal_recv is based on the sig.state
-// variable.  It can be in 3 states: sigIdle, sigReceiving and sigSending.
+// variable. It can be in 3 states: sigIdle, sigReceiving and sigSending.
 // sigReceiving means that signal_recv is blocked on sig.Note and there are no
 // new pending signals.
 // sigSending means that sig.mask *may* contain new pending signals,
@@ -30,16 +30,28 @@ package runtime
 
 import (
 	"runtime/internal/atomic"
-	"unsafe"
+	_ "unsafe" // for go:linkname
 )
 
+// sig handles communication between the signal handler and os/signal.
+// Other than the inuse and recv fields, the fields are accessed atomically.
+//
+// The wanted and ignored fields are only written by one goroutine at
+// a time; access is controlled by the handlers Mutex in os/signal.
+// The fields are only read by that one goroutine and by the signal handler.
+// We access them atomically to minimize the race between setting them
+// in the goroutine calling os/signal and the signal handler,
+// which may be running in a different thread. That race is unavoidable,
+// as there is no connection between handling a signal and receiving one,
+// but atomic instructions should minimize it.
 var sig struct {
-	note   note
-	mask   [(_NSIG + 31) / 32]uint32
-	wanted [(_NSIG + 31) / 32]uint32
-	recv   [(_NSIG + 31) / 32]uint32
-	state  uint32
-	inuse  bool
+	note    note
+	mask    [(_NSIG + 31) / 32]uint32
+	wanted  [(_NSIG + 31) / 32]uint32
+	ignored [(_NSIG + 31) / 32]uint32
+	recv    [(_NSIG + 31) / 32]uint32
+	state   uint32
+	inuse   bool
 }
 
 const (
@@ -52,7 +64,11 @@ const (
 // Reports whether the signal was sent. If not, the caller typically crashes the program.
 func sigsend(s uint32) bool {
 	bit := uint32(1) << uint(s&31)
-	if !sig.inuse || s >= uint32(32*len(sig.wanted)) || sig.wanted[s/32]&bit == 0 {
+	if !sig.inuse || s >= uint32(32*len(sig.wanted)) {
+		return false
+	}
+
+	if w := atomic.Load(&sig.wanted[s/32]); w&bit == 0 {
 		return false
 	}
 
@@ -130,12 +146,29 @@ func signal_recv() uint32 {
 	}
 }
 
+// signalWaitUntilIdle waits until the signal delivery mechanism is idle.
+// This is used to ensure that we do not drop a signal notification due
+// to a race between disabling a signal and receiving a signal.
+// This assumes that signal delivery has already been disabled for
+// the signal(s) in question, and here we are just waiting to make sure
+// that all the signals have been delivered to the user channels
+// by the os/signal package.
+//go:linkname signalWaitUntilIdle os/signal.signalWaitUntilIdle
+func signalWaitUntilIdle() {
+	// Although WaitUntilIdle seems like the right name for this
+	// function, the state we are looking for is sigReceiving, not
+	// sigIdle.  The sigIdle state is really more like sigProcessing.
+	for atomic.Load(&sig.state) != sigReceiving {
+		Gosched()
+	}
+}
+
 // Must only be called from a single goroutine at a time.
 //go:linkname signal_enable os/signal.signal_enable
 func signal_enable(s uint32) {
 	if !sig.inuse {
 		// The first call to signal_enable is for us
-		// to use for initialization.  It does not pass
+		// to use for initialization. It does not pass
 		// signal information in m.
 		sig.inuse = true // enable reception of signals; cannot disable
 		noteclear(&sig.note)
@@ -145,7 +178,15 @@ func signal_enable(s uint32) {
 	if s >= uint32(len(sig.wanted)*32) {
 		return
 	}
-	sig.wanted[s/32] |= 1 << (s & 31)
+
+	w := sig.wanted[s/32]
+	w |= 1 << (s & 31)
+	atomic.Store(&sig.wanted[s/32], w)
+
+	i := sig.ignored[s/32]
+	i &^= 1 << (s & 31)
+	atomic.Store(&sig.ignored[s/32], i)
+
 	sigenable(s)
 }
 
@@ -155,8 +196,11 @@ func signal_disable(s uint32) {
 	if s >= uint32(len(sig.wanted)*32) {
 		return
 	}
-	sig.wanted[s/32] &^= 1 << (s & 31)
 	sigdisable(s)
+
+	w := sig.wanted[s/32]
+	w &^= 1 << (s & 31)
+	atomic.Store(&sig.wanted[s/32], w)
 }
 
 // Must only be called from a single goroutine at a time.
@@ -165,21 +209,19 @@ func signal_ignore(s uint32) {
 	if s >= uint32(len(sig.wanted)*32) {
 		return
 	}
-	sig.wanted[s/32] &^= 1 << (s & 31)
 	sigignore(s)
+
+	w := sig.wanted[s/32]
+	w &^= 1 << (s & 31)
+	atomic.Store(&sig.wanted[s/32], w)
+
+	i := sig.ignored[s/32]
+	i |= 1 << (s & 31)
+	atomic.Store(&sig.ignored[s/32], i)
 }
 
-// This runs on a foreign stack, without an m or a g.  No stack split.
-//go:nosplit
-//go:norace
-func badsignal(sig uintptr) {
-	cgocallback(unsafe.Pointer(funcPC(badsignalgo)), noescape(unsafe.Pointer(&sig)), unsafe.Sizeof(sig))
-}
-
-func badsignalgo(sig uintptr) {
-	if !sigsend(uint32(sig)) {
-		// A foreign thread received the signal sig, and the
-		// Go code does not want to handle it.
-		raisebadsignal(int32(sig))
-	}
+// Checked by signal handlers.
+func signal_ignored(s uint32) bool {
+	i := atomic.Load(&sig.ignored[s/32])
+	return i&(1<<(s&31)) != 0
 }

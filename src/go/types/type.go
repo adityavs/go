@@ -4,10 +4,7 @@
 
 package types
 
-import (
-	"sort"
-	"sync"
-)
+import "sort"
 
 // A Type represents a type of Go.
 // All types implement the Type interface.
@@ -121,10 +118,8 @@ func (s *Slice) Elem() Type { return s.elem }
 
 // A Struct represents a struct type.
 type Struct struct {
-	fields      []*Var
-	tags        []string  // field tags; nil if there are no tags
-	offsets     []int64   // field offsets in bytes, lazily initialized
-	offsetsOnce sync.Once // for threadsafe lazy initialization of offsets
+	fields []*Var
+	tags   []string // field tags; nil if there are no tags
 }
 
 // NewStruct returns a new struct with the given fields and corresponding field tags.
@@ -196,6 +191,7 @@ func (t *Tuple) Len() int {
 func (t *Tuple) At(i int) *Var { return t.vars[i] }
 
 // A Signature represents a (non-builtin) function or method type.
+// The receiver is ignored when comparing signatures for identity.
 type Signature struct {
 	// We need to keep the scope in Signature (rather than passing it around
 	// and store it in the Func Object) because when type-checking a function
@@ -226,10 +222,10 @@ func NewSignature(recv *Var, params, results *Tuple, variadic bool) *Signature {
 }
 
 // Recv returns the receiver of signature s (if a method), or nil if a
-// function.
+// function. It is ignored when comparing signatures for identity.
 //
 // For an abstract method, Recv returns the enclosing interface either
-// as a *Named or an *Interface.  Due to embedding, an interface may
+// as a *Named or an *Interface. Due to embedding, an interface may
 // contain methods whose receiver type is a different interface.
 func (s *Signature) Recv() *Var { return s.recv }
 
@@ -399,7 +395,7 @@ func NewNamed(obj *TypeName, underlying Type, methods []*Func) *Named {
 	return typ
 }
 
-// TypeName returns the type name for the named type t.
+// Obj returns the type name for the named type t.
 func (t *Named) Obj() *TypeName { return t.obj }
 
 // NumMethods returns the number of explicit methods whose receiver is named type t.

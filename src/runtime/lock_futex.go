@@ -13,13 +13,13 @@ import (
 
 // This implementation depends on OS-specific implementations of
 //
-//	runtime·futexsleep(uint32 *addr, uint32 val, int64 ns)
+//	futexsleep(addr *uint32, val uint32, ns int64)
 //		Atomically,
-//			if(*addr == val) sleep
+//			if *addr == val { sleep }
 //		Might be woken up spuriously; that's allowed.
 //		Don't sleep longer than ns; ns < 0 means forever.
 //
-//	runtime·futexwakeup(uint32 *addr, uint32 cnt)
+//	futexwakeup(addr *uint32, cnt uint32)
 //		If any procs are sleeping on addr, wake up at most cnt.
 
 const (
@@ -38,6 +38,7 @@ const (
 // affect mutex's state.
 
 // We use the uintptr mutex.key and note.key as a uint32.
+//go:nosplit
 func key32(p *uintptr) *uint32 {
 	return (*uint32)(unsafe.Pointer(p))
 }
@@ -58,7 +59,7 @@ func lock(l *mutex) {
 
 	// wait is either MUTEX_LOCKED or MUTEX_SLEEPING
 	// depending on whether there is a thread sleeping
-	// on this mutex.  If we ever change l->key from
+	// on this mutex. If we ever change l->key from
 	// MUTEX_SLEEPING to some other value, we must be
 	// careful to change it back to MUTEX_SLEEPING before
 	// returning, to ensure that the sleeping thread gets
@@ -140,9 +141,17 @@ func notesleep(n *note) {
 	if gp != gp.m.g0 {
 		throw("notesleep not on g0")
 	}
+	ns := int64(-1)
+	if *cgo_yield != nil {
+		// Sleep for an arbitrary-but-moderate interval to poll libc interceptors.
+		ns = 10e6
+	}
 	for atomic.Load(key32(&n.key)) == 0 {
 		gp.m.blocked = true
-		futexsleep(key32(&n.key), 0, -1)
+		futexsleep(key32(&n.key), 0, ns)
+		if *cgo_yield != nil {
+			asmcgocall(*cgo_yield, nil)
+		}
 		gp.m.blocked = false
 	}
 }
@@ -156,9 +165,16 @@ func notetsleep_internal(n *note, ns int64) bool {
 	gp := getg()
 
 	if ns < 0 {
+		if *cgo_yield != nil {
+			// Sleep for an arbitrary-but-moderate interval to poll libc interceptors.
+			ns = 10e6
+		}
 		for atomic.Load(key32(&n.key)) == 0 {
 			gp.m.blocked = true
-			futexsleep(key32(&n.key), 0, -1)
+			futexsleep(key32(&n.key), 0, ns)
+			if *cgo_yield != nil {
+				asmcgocall(*cgo_yield, nil)
+			}
 			gp.m.blocked = false
 		}
 		return true
@@ -170,8 +186,14 @@ func notetsleep_internal(n *note, ns int64) bool {
 
 	deadline := nanotime() + ns
 	for {
+		if *cgo_yield != nil && ns > 10e6 {
+			ns = 10e6
+		}
 		gp.m.blocked = true
 		futexsleep(key32(&n.key), 0, ns)
+		if *cgo_yield != nil {
+			asmcgocall(*cgo_yield, nil)
+		}
 		gp.m.blocked = false
 		if atomic.Load(key32(&n.key)) != 0 {
 			break

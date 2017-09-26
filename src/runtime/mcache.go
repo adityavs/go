@@ -11,12 +11,13 @@ import "unsafe"
 //
 // mcaches are allocated from non-GC'd memory, so any heap pointers
 // must be specially handled.
+//
+//go:notinheap
 type mcache struct {
 	// The following members are accessed on every malloc,
 	// so they are grouped here for better caching.
-	next_sample      int32   // trigger heap sample after allocating this many bytes
-	local_cachealloc uintptr // bytes allocated from cache since last lock of heap
-	local_scan       uintptr // bytes of scannable heap allocated
+	next_sample int32   // trigger heap sample after allocating this many bytes
+	local_scan  uintptr // bytes of scannable heap allocated
 
 	// Allocator cache for tiny objects w/o pointers.
 	// See "Tiny allocator" comment in malloc.go.
@@ -32,7 +33,8 @@ type mcache struct {
 	local_tinyallocs uintptr // number of tiny allocs not counted in other stats
 
 	// The rest is not accessed on every malloc.
-	alloc [_NumSizeClasses]*mspan // spans to allocate from
+
+	alloc [numSpanClasses]*mspan // spans to allocate from, indexed by spanClass
 
 	stackcache [_NumStackOrders]stackfreelist
 
@@ -76,8 +78,7 @@ func allocmcache() *mcache {
 	lock(&mheap_.lock)
 	c := (*mcache)(mheap_.cachealloc.alloc())
 	unlock(&mheap_.lock)
-	memclr(unsafe.Pointer(c), unsafe.Sizeof(*c))
-	for i := 0; i < _NumSizeClasses; i++ {
+	for i := range c.alloc {
 		c.alloc[i] = &emptymspan
 	}
 	c.next_sample = nextSample()
@@ -102,36 +103,39 @@ func freemcache(c *mcache) {
 }
 
 // Gets a span that has a free object in it and assigns it
-// to be the cached span for the given sizeclass.  Returns this span.
-func (c *mcache) refill(sizeclass int32) *mspan {
+// to be the cached span for the given sizeclass. Returns this span.
+func (c *mcache) refill(spc spanClass) *mspan {
 	_g_ := getg()
 
 	_g_.m.locks++
 	// Return the current cached span to the central lists.
-	s := c.alloc[sizeclass]
-	if s.freelist.ptr() != nil {
-		throw("refill on a nonempty span")
+	s := c.alloc[spc]
+
+	if uintptr(s.allocCount) != s.nelems {
+		throw("refill of span with free space remaining")
 	}
+
 	if s != &emptymspan {
 		s.incache = false
 	}
 
 	// Get a new cached span from the central lists.
-	s = mheap_.central[sizeclass].mcentral.cacheSpan()
+	s = mheap_.central[spc].mcentral.cacheSpan()
 	if s == nil {
 		throw("out of memory")
 	}
-	if s.freelist.ptr() == nil {
-		println(s.ref, (s.npages<<_PageShift)/s.elemsize)
-		throw("empty span")
+
+	if uintptr(s.allocCount) == s.nelems {
+		throw("span has no free space")
 	}
-	c.alloc[sizeclass] = s
+
+	c.alloc[spc] = s
 	_g_.m.locks--
 	return s
 }
 
 func (c *mcache) releaseAll() {
-	for i := 0; i < _NumSizeClasses; i++ {
+	for i := range c.alloc {
 		s := c.alloc[i]
 		if s != &emptymspan {
 			mheap_.central[i].mcentral.uncacheSpan(s)

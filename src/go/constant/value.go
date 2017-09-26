@@ -10,7 +10,7 @@
 // values produce unknown values unless specified
 // otherwise.
 //
-package constant // import "go/constant"
+package constant
 
 import (
 	"fmt"
@@ -43,13 +43,14 @@ type Value interface {
 	// Kind returns the value kind.
 	Kind() Kind
 
-	// String returns a short, human-readable form of the value.
+	// String returns a short, quoted (human-readable) form of the value.
 	// For numeric values, the result may be an approximation;
 	// for String values the result may be a shortened string.
 	// Use ExactString for a string representing a value exactly.
 	String() string
 
-	// ExactString returns an exact, printable form of the value.
+	// ExactString returns an exact, quoted (human-readable) form of the value.
+	// If the Value is of Kind String, use StringVal to obtain the unquoted string.
 	ExactString() string
 
 	// Prevent external implementations.
@@ -96,7 +97,7 @@ func (x stringVal) String() string {
 		// only the first maxLen-3 runes; then add "...".
 		i := 0
 		for n := 0; n < maxLen-3; n++ {
-			_, size := utf8.DecodeRuneInString(s)
+			_, size := utf8.DecodeRuneInString(s[i:])
 			i += size
 		}
 		s = s[:i] + "..."
@@ -204,13 +205,8 @@ func rtof(x ratVal) floatVal {
 
 func vtoc(x Value) complexVal { return complexVal{x, int64Val(0)} }
 
-var (
-	minInt64 = big.NewInt(-1 << 63)
-	maxInt64 = big.NewInt(1<<63 - 1)
-)
-
 func makeInt(x *big.Int) Value {
-	if minInt64.Cmp(x) <= 0 && x.Cmp(maxInt64) <= 0 {
+	if x.IsInt64() {
 		return int64Val(x.Int64())
 	}
 	return intVal{x}
@@ -249,15 +245,32 @@ func makeComplex(re, im Value) Value {
 
 func makeFloatFromLiteral(lit string) Value {
 	if f, ok := newFloat().SetString(lit); ok {
-		if f.MantExp(nil) < maxExp {
+		if smallRat(f) {
 			// ok to use rationals
+			if f.Sign() == 0 {
+				// Issue 20228: If the float underflowed to zero, parse just "0".
+				// Otherwise, lit might contain a value with a large negative exponent,
+				// such as -6e-1886451601. As a float, that will underflow to 0,
+				// but it'll take forever to parse as a Rat.
+				lit = "0"
+			}
 			r, _ := newRat().SetString(lit)
-			return makeRat(r)
+			return ratVal{r}
 		}
 		// otherwise use floats
 		return makeFloat(f)
 	}
 	return nil
+}
+
+// smallRat reports whether x would lead to "reasonably"-sized fraction
+// if converted to a *big.Rat.
+func smallRat(x *big.Float) bool {
+	if !x.IsInf() {
+		e := x.MantExp(nil)
+		return -maxExp < e && e < maxExp
+	}
+	return false
 }
 
 // ----------------------------------------------------------------------------
@@ -266,10 +279,10 @@ func makeFloatFromLiteral(lit string) Value {
 // MakeUnknown returns the Unknown value.
 func MakeUnknown() Value { return unknownVal{} }
 
-// MakeBool returns the Bool value for x.
+// MakeBool returns the Bool value for b.
 func MakeBool(b bool) Value { return boolVal(b) }
 
-// MakeString returns the String value for x.
+// MakeString returns the String value for s.
 func MakeString(s string) Value { return stringVal(s) }
 
 // MakeInt64 returns the Int value for x.
@@ -298,8 +311,8 @@ func MakeFloat64(x float64) Value {
 
 // MakeFromLiteral returns the corresponding integer, floating-point,
 // imaginary, character, or string value for a Go literal string. The
-// tok value must be one of token.INT, token.FLOAT, toke.IMAG, token.
-// CHAR, or token.STRING. The final argument must be zero.
+// tok value must be one of token.INT, token.FLOAT, token.IMAG,
+// token.CHAR, or token.STRING. The final argument must be zero.
 // If the literal string syntax is invalid, the result is an Unknown.
 func MakeFromLiteral(lit string, tok token.Token, zero uint) Value {
 	if zero != 0 {
@@ -402,7 +415,7 @@ func Uint64Val(x Value) (uint64, bool) {
 	case int64Val:
 		return uint64(x), x >= 0
 	case intVal:
-		return x.val.Uint64(), x.val.Sign() >= 0 && x.val.BitLen() <= 64
+		return x.val.Uint64(), x.val.IsUint64()
 	case unknownVal:
 		return 0, false
 	default:
@@ -572,35 +585,6 @@ func MakeFromBytes(bytes []byte) Value {
 	return makeInt(newInt().SetBits(words[:i]))
 }
 
-// toRat returns the fraction corresponding to x, or nil
-// if x cannot be represented as a fraction a/b because
-// its components a or b are too large.
-func toRat(x *big.Float) *big.Rat {
-	m := newFloat()
-	e := x.MantExp(m)
-
-	// fail to convert if fraction components are too large
-	if e <= maxExp || e >= maxExp {
-		return nil
-	}
-
-	// convert mantissa to big.Int value by shifting by ecorr
-	ecorr := int(m.MinPrec())
-	a, _ := m.SetMantExp(m, ecorr).Int(nil)
-	e -= ecorr // correct exponent
-
-	// compute actual fraction
-	b := big.NewInt(1)
-	switch {
-	case e < 0:
-		b.Lsh(b, uint(-e))
-	case e > 0:
-		a.Lsh(a, uint(e))
-	}
-
-	return new(big.Rat).SetFrac(a, b)
-}
-
 // Num returns the numerator of x; x must be Int, Float, or Unknown.
 // If x is Unknown, or if it is too large or small to represent as a
 // fraction, the result is Unknown. Otherwise the result is an Int
@@ -612,7 +596,8 @@ func Num(x Value) Value {
 	case ratVal:
 		return makeInt(x.val.Num())
 	case floatVal:
-		if r := toRat(x.val); r != nil {
+		if smallRat(x.val) {
+			r, _ := x.val.Rat(nil)
 			return makeInt(r.Num())
 		}
 	case unknownVal:
@@ -633,7 +618,8 @@ func Denom(x Value) Value {
 	case ratVal:
 		return makeInt(x.val.Denom())
 	case floatVal:
-		if r := toRat(x.val); r != nil {
+		if smallRat(x.val) {
+			r, _ := x.val.Rat(nil)
 			return makeInt(r.Denom())
 		}
 	case unknownVal:
@@ -703,8 +689,9 @@ func ToInt(x Value) Value {
 
 	case floatVal:
 		// avoid creation of huge integers
-		// (existing tests require permitting exponents of at least 1024)
-		if x.val.MantExp(nil) <= 1024 {
+		// (Existing tests require permitting exponents of at least 1024;
+		// allow any value that would also be permissible as a fraction.)
+		if smallRat(x.val) {
 			i := newInt()
 			if _, acc := x.val.Int(i); acc == big.Exact {
 				return makeInt(i)
@@ -863,6 +850,10 @@ Error:
 
 func ord(x Value) int {
 	switch x.(type) {
+	default:
+		// force invalid value into "x position" in match
+		// (don't panic here so that callers can provide a better error message)
+		return -1
 	case unknownVal:
 		return 0
 	case boolVal, stringVal:
@@ -877,15 +868,13 @@ func ord(x Value) int {
 		return 5
 	case complexVal:
 		return 6
-	default:
-		panic("unreachable")
 	}
 }
 
 // match returns the matching representation (same type) with the
 // smallest complexity for two values x and y. If one of them is
-// numeric, both of them must be numeric. If one of them is Unknown,
-// both results are Unknown.
+// numeric, both of them must be numeric. If one of them is Unknown
+// or invalid (say, nil) both results are that value.
 //
 func match(x, y Value) (_, _ Value) {
 	if ord(x) > ord(y) {
@@ -895,9 +884,6 @@ func match(x, y Value) (_, _ Value) {
 	// ord(x) <= ord(y)
 
 	switch x := x.(type) {
-	case unknownVal:
-		return x, x
-
 	case boolVal, stringVal, complexVal:
 		return x, y
 
@@ -936,6 +922,7 @@ func match(x, y Value) (_, _ Value) {
 		case complexVal:
 			return vtoc(x), y
 		}
+
 	case floatVal:
 		switch y := y.(type) {
 		case floatVal:
@@ -945,18 +932,23 @@ func match(x, y Value) (_, _ Value) {
 		}
 	}
 
-	panic("unreachable")
+	// force unknown and invalid values into "x position" in callers of match
+	// (don't panic here so that callers can provide a better error message)
+	return x, x
 }
 
 // BinaryOp returns the result of the binary expression x op y.
 // The operation must be defined for the operands. If one of the
 // operands is Unknown, the result is Unknown.
+// BinaryOp doesn't handle comparisons or shifts; use Compare
+// or Shift instead.
+//
 // To force integer division of Int operands, use op == token.QUO_ASSIGN
 // instead of token.QUO; the result is guaranteed to be Int in this case.
 // Division by zero leads to a run-time panic.
 //
-func BinaryOp(x Value, op token.Token, y Value) Value {
-	x, y = match(x, y)
+func BinaryOp(x_ Value, op token.Token, y_ Value) Value {
+	x, y := match(x_, y_)
 
 	switch x := x.(type) {
 	case unknownVal:
@@ -1123,7 +1115,7 @@ func BinaryOp(x Value, op token.Token, y Value) Value {
 	}
 
 Error:
-	panic(fmt.Sprintf("invalid binary operation %v %s %v", x, op, y))
+	panic(fmt.Sprintf("invalid binary operation %v %s %v", x_, op, y_))
 }
 
 func add(x, y Value) Value { return BinaryOp(x, token.ADD, y) }
@@ -1183,7 +1175,7 @@ func cmpZero(x int, op token.Token) bool {
 	case token.GEQ:
 		return x >= 0
 	}
-	panic("unreachable")
+	panic(fmt.Sprintf("invalid comparison %v %s 0", x, op))
 }
 
 // Compare returns the result of the comparison x op y.
@@ -1191,8 +1183,8 @@ func cmpZero(x int, op token.Token) bool {
 // If one of the operands is Unknown, the result is
 // false.
 //
-func Compare(x Value, op token.Token, y Value) bool {
-	x, y = match(x, y)
+func Compare(x_ Value, op token.Token, y_ Value) bool {
+	x, y := match(x_, y_)
 
 	switch x := x.(type) {
 	case unknownVal:
@@ -1262,5 +1254,5 @@ func Compare(x Value, op token.Token, y Value) bool {
 		}
 	}
 
-	panic(fmt.Sprintf("invalid comparison %v %s %v", x, op, y))
+	panic(fmt.Sprintf("invalid comparison %v %s %v", x_, op, y_))
 }

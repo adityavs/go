@@ -35,48 +35,113 @@ func initPrintFlags() {
 		if len(name) == 0 {
 			flag.Usage()
 		}
-		skip := 0
+
+		// Backwards compatibility: skip optional first argument
+		// index after the colon.
 		if colon := strings.LastIndex(name, ":"); colon > 0 {
-			var err error
-			skip, err = strconv.Atoi(name[colon+1:])
-			if err != nil {
-				errorf(`illegal format for "Func:N" argument %q; %s`, name, err)
-			}
 			name = name[:colon]
 		}
+
 		name = strings.ToLower(name)
 		if name[len(name)-1] == 'f' {
-			printfList[name] = skip
+			isFormattedPrint[name] = true
 		} else {
-			printList[name] = skip
+			isPrint[name] = true
 		}
 	}
 }
 
-// printfList records the formatted-print functions. The value is the location
-// of the format parameter. Names are lower-cased so the lookup is
-// case insensitive.
-var printfList = map[string]int{
-	"errorf":  0,
-	"fatalf":  0,
-	"fprintf": 1,
-	"logf":    0,
-	"panicf":  0,
-	"printf":  0,
-	"sprintf": 0,
+// isFormattedPrint records the formatted-print functions. Names are
+// lower-cased so the lookup is case insensitive.
+var isFormattedPrint = map[string]bool{
+	"errorf":  true,
+	"fatalf":  true,
+	"fprintf": true,
+	"logf":    true,
+	"panicf":  true,
+	"printf":  true,
+	"sprintf": true,
 }
 
-// printList records the unformatted-print functions. The value is the location
-// of the first parameter to be printed.  Names are lower-cased so the lookup is
-// case insensitive.
-var printList = map[string]int{
-	"error":  0,
-	"fatal":  0,
-	"fprint": 1, "fprintln": 1,
-	"log":   0,
-	"panic": 0, "panicln": 0,
-	"print": 0, "println": 0,
-	"sprint": 0, "sprintln": 0,
+// isPrint records the unformatted-print functions. Names are lower-cased
+// so the lookup is case insensitive.
+var isPrint = map[string]bool{
+	"error":    true,
+	"fatal":    true,
+	"fprint":   true,
+	"fprintln": true,
+	"log":      true,
+	"panic":    true,
+	"panicln":  true,
+	"print":    true,
+	"println":  true,
+	"sprint":   true,
+	"sprintln": true,
+}
+
+// formatString returns the format string argument and its index within
+// the given printf-like call expression.
+//
+// The last parameter before variadic arguments is assumed to be
+// a format string.
+//
+// The first string literal or string constant is assumed to be a format string
+// if the call's signature cannot be determined.
+//
+// If it cannot find any format string parameter, it returns  ("", -1).
+func formatString(f *File, call *ast.CallExpr) (string, int) {
+	typ := f.pkg.types[call.Fun].Type
+	if typ != nil {
+		if sig, ok := typ.(*types.Signature); ok {
+			if !sig.Variadic() {
+				// Skip checking non-variadic functions.
+				return "", -1
+			}
+			idx := sig.Params().Len() - 2
+			if idx < 0 {
+				// Skip checking variadic functions without
+				// fixed arguments.
+				return "", -1
+			}
+			s, ok := stringConstantArg(f, call, idx)
+			if !ok {
+				// The last argument before variadic args isn't a string.
+				return "", -1
+			}
+			return s, idx
+		}
+	}
+
+	// Cannot determine call's signature. Fall back to scanning for the first
+	// string constant in the call.
+	for idx := range call.Args {
+		if s, ok := stringConstantArg(f, call, idx); ok {
+			return s, idx
+		}
+		if f.pkg.types[call.Args[idx]].Type == types.Typ[types.String] {
+			// Skip checking a call with a non-constant format
+			// string argument, since its contents are unavailable
+			// for validation.
+			return "", -1
+		}
+	}
+	return "", -1
+}
+
+// stringConstantArg returns call's string constant argument at the index idx.
+//
+// ("", false) is returned if call's argument at the index idx isn't a string
+// constant.
+func stringConstantArg(f *File, call *ast.CallExpr, idx int) (string, bool) {
+	if idx >= len(call.Args) {
+		return "", false
+	}
+	arg := call.Args[idx]
+	lit := f.pkg.types[arg].Value
+	if lit != nil && lit.Kind() == constant.String {
+		return constant.StringVal(lit), true
+	}
+	return "", false
 }
 
 // checkCall triggers the print-specific checks if the call invokes a print function.
@@ -109,12 +174,12 @@ func checkFmtPrintfCall(f *File, node ast.Node) {
 	}
 
 	name := strings.ToLower(Name)
-	if skip, ok := printfList[name]; ok {
-		f.checkPrintf(call, Name, skip)
+	if _, ok := isFormattedPrint[name]; ok {
+		f.checkPrintf(call, Name)
 		return
 	}
-	if skip, ok := printList[name]; ok {
-		f.checkPrint(call, Name, skip)
+	if _, ok := isPrint[name]; ok {
+		f.checkPrint(call, Name)
 		return
 	}
 }
@@ -127,6 +192,12 @@ func isStringer(f *File, d *ast.FuncDecl) bool {
 		f.pkg.types[d.Type.Results.List[0].Type].Type == types.Typ[types.String]
 }
 
+// isFormatter reports whether t satisfies fmt.Formatter.
+// Unlike fmt.Stringer, it's impossible to satisfy fmt.Formatter without importing fmt.
+func (f *File) isFormatter(t types.Type) bool {
+	return formatterType != nil && types.Implements(t, formatterType)
+}
+
 // formatState holds the parsed representation of a printf directive such as "%3.*[4]d".
 // It is constructed by parsePrintfVerb.
 type formatState struct {
@@ -135,7 +206,6 @@ type formatState struct {
 	name     string // Printf, Sprintf etc.
 	flags    []byte // the list of # + etc.
 	argNums  []int  // the successive argument numbers that are consumed, adjusted to refer to actual arg in call
-	indexed  bool   // whether an indexing expression appears: %[1]d.
 	firstArg int    // Index of first argument after the format in the Printf call.
 	// Used only during parse.
 	file         *File
@@ -146,25 +216,16 @@ type formatState struct {
 }
 
 // checkPrintf checks a call to a formatted print routine such as Printf.
-// call.Args[formatIndex] is (well, should be) the format argument.
-func (f *File) checkPrintf(call *ast.CallExpr, name string, formatIndex int) {
-	if formatIndex >= len(call.Args) {
-		f.Bad(call.Pos(), "too few arguments in call to", name)
-		return
-	}
-	lit := f.pkg.types[call.Args[formatIndex]].Value
-	if lit == nil {
+func (f *File) checkPrintf(call *ast.CallExpr, name string) {
+	format, idx := formatString(f, call)
+	if idx < 0 {
 		if *verbose {
 			f.Warn(call.Pos(), "can't check non-constant format in call to", name)
 		}
 		return
 	}
-	if lit.Kind() != constant.String {
-		f.Badf(call.Pos(), "constant %v not a string in call to %s", lit, name)
-		return
-	}
-	format := constant.StringVal(lit)
-	firstArg := formatIndex + 1 // Arguments are immediately after format string.
+
+	firstArg := idx + 1 // Arguments are immediately after format string.
 	if !strings.Contains(format, "%") {
 		if len(call.Args) > firstArg {
 			f.Badf(call.Pos(), "no formatting directive in %s call", name)
@@ -173,35 +234,37 @@ func (f *File) checkPrintf(call *ast.CallExpr, name string, formatIndex int) {
 	}
 	// Hard part: check formats against args.
 	argNum := firstArg
-	indexed := false
+	maxArgNum := firstArg
 	for i, w := 0, 0; i < len(format); i += w {
 		w = 1
-		if format[i] == '%' {
-			state := f.parsePrintfVerb(call, name, format[i:], firstArg, argNum)
-			if state == nil {
-				return
-			}
-			w = len(state.format)
-			if state.indexed {
-				indexed = true
-			}
-			if !f.okPrintfArg(call, state) { // One error per format is enough.
-				return
-			}
-			if len(state.argNums) > 0 {
-				// Continue with the next sequential argument.
-				argNum = state.argNums[len(state.argNums)-1] + 1
+		if format[i] != '%' {
+			continue
+		}
+		state := f.parsePrintfVerb(call, name, format[i:], firstArg, argNum)
+		if state == nil {
+			return
+		}
+		w = len(state.format)
+		if !f.okPrintfArg(call, state) { // One error per format is enough.
+			return
+		}
+		if len(state.argNums) > 0 {
+			// Continue with the next sequential argument.
+			argNum = state.argNums[len(state.argNums)-1] + 1
+		}
+		for _, n := range state.argNums {
+			if n >= maxArgNum {
+				maxArgNum = n + 1
 			}
 		}
 	}
 	// Dotdotdot is hard.
-	if call.Ellipsis.IsValid() && argNum >= len(call.Args)-1 {
+	if call.Ellipsis.IsValid() && maxArgNum >= len(call.Args)-1 {
 		return
 	}
-	// If the arguments were direct indexed, we assume the programmer knows what's up.
-	// Otherwise, there should be no leftover arguments.
-	if !indexed && argNum != len(call.Args) {
-		expect := argNum - firstArg
+	// There should be no leftover arguments.
+	if maxArgNum != len(call.Args) {
+		expect := maxArgNum - firstArg
 		numArgs := len(call.Args) - firstArg
 		f.Badf(call.Pos(), "wrong number of args for format in %s call: %d needed but %d args", name, expect, numArgs)
 	}
@@ -236,17 +299,20 @@ func (s *formatState) parseIndex() bool {
 		return true
 	}
 	// Argument index present.
-	s.indexed = true
 	s.nbytes++ // skip '['
 	start := s.nbytes
 	s.scanNum()
 	if s.nbytes == len(s.format) || s.nbytes == start || s.format[s.nbytes] != ']' {
-		s.file.Badf(s.call.Pos(), "illegal syntax for printf argument index")
+		end := strings.IndexByte(s.format, ']')
+		if end < 0 {
+			end = len(s.format)
+		}
+		s.file.Badf(s.call.Pos(), "bad syntax for printf argument index: [%s]", s.format[start:end])
 		return false
 	}
 	arg32, err := strconv.ParseInt(s.format[start:s.nbytes], 10, 32)
 	if err != nil {
-		s.file.Badf(s.call.Pos(), "illegal syntax for printf argument index: %s", err)
+		s.file.Badf(s.call.Pos(), "bad syntax for printf argument index: %s", err)
 		return false
 	}
 	s.nbytes++ // skip ']'
@@ -299,14 +365,12 @@ func (f *File) parsePrintfVerb(call *ast.CallExpr, name, format string, firstArg
 		argNum:   argNum,
 		argNums:  make([]int, 0, 1),
 		nbytes:   1, // There's guaranteed to be a percent sign.
-		indexed:  false,
 		firstArg: firstArg,
 		file:     f,
 		call:     call,
 	}
 	// There may be flags.
 	state.parseFlags()
-	indexPending := false
 	// There may be an index.
 	if !state.parseIndex() {
 		return nil
@@ -320,7 +384,7 @@ func (f *File) parsePrintfVerb(call *ast.CallExpr, name, format string, firstArg
 		return nil
 	}
 	// Now a verb, possibly prefixed by an index (which we may already have).
-	if !indexPending && !state.parseIndex() {
+	if !state.indexPending && !state.parseIndex() {
 		return nil
 	}
 	if state.nbytes == len(state.format) {
@@ -366,8 +430,6 @@ const (
 )
 
 // printVerbs identifies which flags are known to printf for each verb.
-// TODO: A type that implements Formatter may do what it wants, and vet
-// will complain incorrectly.
 var printVerbs = []printVerb{
 	// '-' is a width modifier, always valid.
 	// '.' is a precision for float, max width for strings.
@@ -378,12 +440,12 @@ var printVerbs = []printVerb{
 	{'b', numFlag, argInt | argFloat | argComplex},
 	{'c', "-", argRune | argInt},
 	{'d', numFlag, argInt},
-	{'e', numFlag, argFloat | argComplex},
-	{'E', numFlag, argFloat | argComplex},
-	{'f', numFlag, argFloat | argComplex},
-	{'F', numFlag, argFloat | argComplex},
-	{'g', numFlag, argFloat | argComplex},
-	{'G', numFlag, argFloat | argComplex},
+	{'e', sharpNumFlag, argFloat | argComplex},
+	{'E', sharpNumFlag, argFloat | argComplex},
+	{'f', sharpNumFlag, argFloat | argComplex},
+	{'F', sharpNumFlag, argFloat | argComplex},
+	{'g', sharpNumFlag, argFloat | argComplex},
+	{'G', sharpNumFlag, argFloat | argComplex},
 	{'o', sharpNumFlag, argInt},
 	{'p', "-#", argPointer},
 	{'q', " -+.0#", argRune | argInt | argString},
@@ -409,7 +471,16 @@ func (f *File) okPrintfArg(call *ast.CallExpr, state *formatState) (ok bool) {
 			break
 		}
 	}
-	if !found {
+
+	// Does current arg implement fmt.Formatter?
+	formatter := false
+	if state.argNum < len(call.Args) {
+		if tv, ok := f.pkg.types[call.Args[state.argNum]]; ok {
+			formatter = f.isFormatter(tv.Type)
+		}
+	}
+
+	if !found && !formatter {
 		f.Badf(call.Pos(), "unrecognized printf verb %q", state.verb)
 		return false
 	}
@@ -428,7 +499,7 @@ func (f *File) okPrintfArg(call *ast.CallExpr, state *formatState) (ok bool) {
 	nargs := len(state.argNums)
 	for i := 0; i < nargs-trueArgs; i++ {
 		argNum := state.argNums[i]
-		if !f.argCanBeChecked(call, i, true, state) {
+		if !f.argCanBeChecked(call, i, state) {
 			return
 		}
 		arg := call.Args[argNum]
@@ -437,20 +508,20 @@ func (f *File) okPrintfArg(call *ast.CallExpr, state *formatState) (ok bool) {
 			return false
 		}
 	}
-	if state.verb == '%' {
+	if state.verb == '%' || formatter {
 		return true
 	}
 	argNum := state.argNums[len(state.argNums)-1]
-	if !f.argCanBeChecked(call, len(state.argNums)-1, false, state) {
+	if !f.argCanBeChecked(call, len(state.argNums)-1, state) {
 		return false
 	}
 	arg := call.Args[argNum]
+	if f.isFunctionValue(arg) && state.verb != 'p' && state.verb != 'T' {
+		f.Badf(call.Pos(), "arg %s in printf call is a function value, not a function call", f.gofmt(arg))
+		return false
+	}
 	if !f.matchArgType(v.typ, nil, arg) {
 		typeString := ""
-		if f.isFunctionValue(arg) {
-			f.Badf(call.Pos(), "arg %s in printf call is a function value, not a function call", f.gofmt(arg))
-			return false
-		}
 		if typ := f.pkg.types[arg].Type; typ != nil {
 			typeString = typ.String()
 		}
@@ -507,7 +578,7 @@ func (f *File) isFunctionValue(e ast.Expr) bool {
 // argCanBeChecked reports whether the specified argument is statically present;
 // it may be beyond the list of arguments or in a terminal slice... argument, which
 // means we can't see it.
-func (f *File) argCanBeChecked(call *ast.CallExpr, formatArg int, isStar bool, state *formatState) bool {
+func (f *File) argCanBeChecked(call *ast.CallExpr, formatArg int, state *formatState) bool {
 	argNum := state.argNums[formatArg]
 	if argNum < 0 {
 		// Shouldn't happen, so catch it with prejudice.
@@ -534,25 +605,38 @@ func (f *File) argCanBeChecked(call *ast.CallExpr, formatArg int, isStar bool, s
 }
 
 // checkPrint checks a call to an unformatted print routine such as Println.
-// call.Args[firstArg] is the first argument to be printed.
-func (f *File) checkPrint(call *ast.CallExpr, name string, firstArg int) {
-	isLn := strings.HasSuffix(name, "ln")
-	isF := strings.HasPrefix(name, "F")
-	args := call.Args
-	if name == "Log" && len(args) > 0 {
-		// Special case: Don't complain about math.Log or cmplx.Log.
-		// Not strictly necessary because the only complaint likely is for Log("%d")
-		// but it feels wrong to check that math.Log is a good print function.
-		if sel, ok := args[0].(*ast.SelectorExpr); ok {
-			if x, ok := sel.X.(*ast.Ident); ok {
-				if x.Name == "math" || x.Name == "cmplx" {
-					return
-				}
-			}
+func (f *File) checkPrint(call *ast.CallExpr, name string) {
+	firstArg := 0
+	typ := f.pkg.types[call.Fun].Type
+	if typ == nil {
+		// Skip checking functions with unknown type.
+		return
+	}
+	if sig, ok := typ.(*types.Signature); ok {
+		if !sig.Variadic() {
+			// Skip checking non-variadic functions.
+			return
+		}
+		params := sig.Params()
+		firstArg = params.Len() - 1
+
+		typ := params.At(firstArg).Type()
+		typ = typ.(*types.Slice).Elem()
+		it, ok := typ.(*types.Interface)
+		if !ok || !it.Empty() {
+			// Skip variadic functions accepting non-interface{} args.
+			return
 		}
 	}
+	args := call.Args
+	if len(args) <= firstArg {
+		// Skip calls without variadic args.
+		return
+	}
+	args = args[firstArg:]
+
 	// check for Println(os.Stderr, ...)
-	if firstArg == 0 && !isF && len(args) > 0 {
+	if firstArg == 0 {
 		if sel, ok := args[0].(*ast.SelectorExpr); ok {
 			if x, ok := sel.X.(*ast.Ident); ok {
 				if x.Name == "os" && strings.HasPrefix(sel.Sel.Name, "Std") {
@@ -561,31 +645,18 @@ func (f *File) checkPrint(call *ast.CallExpr, name string, firstArg int) {
 			}
 		}
 	}
-	if len(args) <= firstArg {
-		// If we have a call to a method called Error that satisfies the Error interface,
-		// then it's ok. Otherwise it's something like (*T).Error from the testing package
-		// and we need to check it.
-		if name == "Error" && f.isErrorMethodCall(call) {
-			return
-		}
-		// If it's an Error call now, it's probably for printing errors.
-		if !isLn {
-			// Check the signature to be sure: there are niladic functions called "error".
-			if firstArg != 0 || f.numArgsInSignature(call) != firstArg {
-				f.Badf(call.Pos(), "no args in %s call", name)
-			}
-		}
-		return
-	}
-	arg := args[firstArg]
+	arg := args[0]
 	if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-		if strings.Contains(lit.Value, "%") {
+		// Ignore trailing % character in lit.Value.
+		// The % in "abc 0.0%" couldn't be a formatting directive.
+		s := strings.TrimSuffix(lit.Value, `%"`)
+		if strings.Contains(s, "%") {
 			f.Badf(call.Pos(), "possible formatting directive in %s call", name)
 		}
 	}
-	if isLn {
+	if strings.HasSuffix(name, "ln") {
 		// The last item, if a string, should not have a newline.
-		arg = args[len(call.Args)-1]
+		arg = args[len(args)-1]
 		if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.STRING {
 			if strings.HasSuffix(lit.Value, `\n"`) {
 				f.Badf(call.Pos(), "%s call ends with newline", name)

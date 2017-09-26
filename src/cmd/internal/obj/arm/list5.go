@@ -1,5 +1,5 @@
 // Inferno utils/5c/list.c
-// http://code.google.com/p/inferno-os/source/browse/utils/5c/list.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/5c/list.c
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -36,11 +36,11 @@ import (
 )
 
 func init() {
-	obj.RegisterRegister(obj.RBaseARM, MAXREG, Rconv)
+	obj.RegisterRegister(obj.RBaseARM, MAXREG, rconv)
 	obj.RegisterOpcode(obj.ABaseARM, Anames)
 }
 
-func Rconv(r int) string {
+func rconv(r int) string {
 	if r == 0 {
 		return "NONE"
 	}

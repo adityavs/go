@@ -1,4 +1,4 @@
-// Copyright 2014 The Go Authors.  All rights reserved.
+// Copyright 2014 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -6,8 +6,10 @@ package trace_test
 
 import (
 	"bytes"
+	"flag"
 	"internal/trace"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"runtime"
@@ -15,6 +17,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+)
+
+var (
+	saveTraces = flag.Bool("savetraces", false, "save traces collected by tests")
 )
 
 func TestTraceStartStop(t *testing.T) {
@@ -31,6 +37,7 @@ func TestTraceStartStop(t *testing.T) {
 	if size != buf.Len() {
 		t.Fatalf("trace writes after stop: %v -> %v", size, buf.Len())
 	}
+	saveTrace(t, buf, "TestTraceStartStop")
 }
 
 func TestTraceDoubleStart(t *testing.T) {
@@ -52,7 +59,8 @@ func TestTrace(t *testing.T) {
 		t.Fatalf("failed to start tracing: %v", err)
 	}
 	Stop()
-	_, err := trace.Parse(buf)
+	saveTrace(t, buf, "TestTrace")
+	_, err := trace.Parse(buf, "")
 	if err == trace.ErrTimeOrder {
 		t.Skipf("skipping trace: %v", err)
 	}
@@ -61,13 +69,13 @@ func TestTrace(t *testing.T) {
 	}
 }
 
-func parseTrace(t *testing.T, r io.Reader) ([]*trace.Event, map[uint64]*trace.GDesc, error) {
-	events, err := trace.Parse(r)
+func parseTrace(t *testing.T, r io.Reader) ([]*trace.Event, map[uint64]*trace.GDesc) {
+	events, err := trace.Parse(r, "")
 	if err == trace.ErrTimeOrder {
 		t.Skipf("skipping trace: %v", err)
 	}
 	if err != nil {
-		return nil, nil, err
+		t.Fatalf("failed to parse trace: %v", err)
 	}
 	gs := trace.GoroutineStats(events)
 	for goid := range gs {
@@ -75,7 +83,31 @@ func parseTrace(t *testing.T, r io.Reader) ([]*trace.Event, map[uint64]*trace.GD
 		// But still check that RelatedGoroutines does not crash, hang, etc.
 		_ = trace.RelatedGoroutines(events, goid)
 	}
-	return events, gs, nil
+	return events, gs
+}
+
+func testBrokenTimestamps(t *testing.T, data []byte) {
+	// On some processors cputicks (used to generate trace timestamps)
+	// produce non-monotonic timestamps. It is important that the parser
+	// distinguishes logically inconsistent traces (e.g. missing, excessive
+	// or misordered events) from broken timestamps. The former is a bug
+	// in tracer, the latter is a machine issue.
+	// So now that we have a consistent trace, test that (1) parser does
+	// not return a logical error in case of broken timestamps
+	// and (2) broken timestamps are eventually detected and reported.
+	trace.BreakTimestampsForTesting = true
+	defer func() {
+		trace.BreakTimestampsForTesting = false
+	}()
+	for i := 0; i < 1e4; i++ {
+		_, err := trace.Parse(bytes.NewReader(data), "")
+		if err == trace.ErrTimeOrder {
+			return
+		}
+		if err != nil {
+			t.Fatalf("failed to parse trace: %v", err)
+		}
+	}
 }
 
 func TestTraceStress(t *testing.T) {
@@ -209,10 +241,10 @@ func TestTraceStress(t *testing.T) {
 	runtime.GOMAXPROCS(procs)
 
 	Stop()
-	_, _, err = parseTrace(t, buf)
-	if err != nil {
-		t.Fatalf("failed to parse trace: %v", err)
-	}
+	saveTrace(t, buf, "TestTraceStress")
+	trace := buf.Bytes()
+	parseTrace(t, buf)
+	testBrokenTimestamps(t, trace)
 }
 
 // Do a bunch of various stuff (timers, GC, network, etc) in a separate goroutine.
@@ -237,7 +269,8 @@ func TestTraceStressStartStop(t *testing.T) {
 
 		rp, wp, err := os.Pipe()
 		if err != nil {
-			t.Fatalf("failed to create pipe: %v", err)
+			t.Errorf("failed to create pipe: %v", err)
+			return
 		}
 		defer func() {
 			rp.Close()
@@ -313,7 +346,8 @@ func TestTraceStressStartStop(t *testing.T) {
 		// A bit of network.
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			t.Fatalf("listen failed: %v", err)
+			t.Errorf("listen failed: %v", err)
+			return
 		}
 		defer ln.Close()
 		go func() {
@@ -328,7 +362,8 @@ func TestTraceStressStartStop(t *testing.T) {
 		}()
 		c, err := net.Dial("tcp", ln.Addr().String())
 		if err != nil {
-			t.Fatalf("dial failed: %v", err)
+			t.Errorf("dial failed: %v", err)
+			return
 		}
 		var tmp [1]byte
 		c.Read(tmp[:])
@@ -353,9 +388,10 @@ func TestTraceStressStartStop(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 		Stop()
-		if _, _, err := parseTrace(t, buf); err != nil {
-			t.Fatalf("failed to parse trace: %v", err)
-		}
+		saveTrace(t, buf, "TestTraceStressStartStop")
+		trace := buf.Bytes()
+		parseTrace(t, buf)
+		testBrokenTimestamps(t, trace)
 	}
 	<-outerDone
 }
@@ -413,10 +449,8 @@ func TestTraceFutileWakeup(t *testing.T) {
 	done.Wait()
 
 	Stop()
-	events, _, err := parseTrace(t, buf)
-	if err != nil {
-		t.Fatalf("failed to parse trace: %v", err)
-	}
+	saveTrace(t, buf, "TestTraceFutileWakeup")
+	events, _ := parseTrace(t, buf)
 	// Check that (1) trace does not contain EvFutileWakeup events and
 	// (2) there are no consecutive EvGoBlock/EvGCStart/EvGoBlock events
 	// (we call runtime.Gosched between all operations, so these would be futile wakeups).
@@ -442,5 +476,14 @@ func TestTraceFutileWakeup(t *testing.T) {
 		default:
 			delete(gs, ev.G)
 		}
+	}
+}
+
+func saveTrace(t *testing.T, buf *bytes.Buffer, name string) {
+	if !*saveTraces {
+		return
+	}
+	if err := ioutil.WriteFile(name+".trace", buf.Bytes(), 0600); err != nil {
+		t.Errorf("failed to write trace file: %s", err)
 	}
 }

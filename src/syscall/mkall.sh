@@ -89,6 +89,8 @@ case "$1" in
 -syscalls)
 	for i in zsyscall*go
 	do
+		# Run the command line that appears in the first line
+		# of the generated file to regenerate it.
 		sed 1q $i | sed 's;^// ;;' | sh > _$i && gofmt < _$i > $i
 		rm _$i
 	done
@@ -156,8 +158,8 @@ freebsd_arm)
 	mkerrors="$mkerrors"
 	mksyscall="./mksyscall.pl -l32 -arm"
 	mksysnum="curl -s 'http://svn.freebsd.org/base/stable/10/sys/kern/syscalls.master' | ./mksysnum_freebsd.pl"
-	# Let the type of C char be singed for making the bare syscall
-	# API consistent across over platforms.
+	# Let the type of C char be signed to make the bare syscall
+	# API consistent between platforms.
 	mktypes="GOARCH=$GOARCH go tool cgo -godefs -- -fsigned-char"
 	;;
 linux_386)
@@ -189,8 +191,8 @@ linux_arm64)
 		exit 1
 	fi
 	mksysnum="./mksysnum_linux.pl $unistd_h"
-	# Let the type of C char be singed for making the bare syscall
-	# API consistent across over platforms.
+	# Let the type of C char be signed to make the bare syscall
+	# API consistent between platforms.
 	mktypes="GOARCH=$GOARCH go tool cgo -godefs -- -fsigned-char"
 	;;
 linux_ppc64)
@@ -203,6 +205,13 @@ linux_ppc64)
 linux_ppc64le)
 	GOOSARCH_in=syscall_linux_ppc64x.go
 	unistd_h=/usr/include/powerpc64le-linux-gnu/asm/unistd.h
+	mkerrors="$mkerrors -m64"
+	mksysnum="./mksysnum_linux.pl $unistd_h"
+	mktypes="GOARCH=$GOARCH go tool cgo -godefs"
+	;;
+linux_s390x)
+	GOOSARCH_in=syscall_linux_s390x.go
+	unistd_h=/usr/include/asm/unistd.h
 	mkerrors="$mkerrors -m64"
 	mksysnum="./mksysnum_linux.pl $unistd_h"
 	mktypes="GOARCH=$GOARCH go tool cgo -godefs"
@@ -268,7 +277,7 @@ solaris_amd64)
 	mktypes="GOARCH=$GOARCH go tool cgo -godefs"
 	;;
 windows_*)
-	echo 'run "go generate syscall_windows.go" instead' 1>&2
+	echo 'run "go generate" instead' 1>&2
 	exit 1
 	;;
 *)
@@ -285,8 +294,8 @@ esac
 		syscall_goos="syscall_bsd.go $syscall_goos"
  		;;
  	esac
-	if [ -n "$mksyscall" ]; then echo "$mksyscall $syscall_goos $GOOSARCH_in |gofmt >zsyscall_$GOOSARCH.go"; fi
+	if [ -n "$mksyscall" ]; then echo "$mksyscall -tags $GOOS,$GOARCH $syscall_goos $GOOSARCH_in |gofmt >zsyscall_$GOOSARCH.go"; fi
 	if [ -n "$mksysctl" ]; then echo "$mksysctl |gofmt >$zsysctl"; fi
 	if [ -n "$mksysnum" ]; then echo "$mksysnum |gofmt >zsysnum_$GOOSARCH.go"; fi
-	if [ -n "$mktypes" ]; then echo "$mktypes types_$GOOS.go |gofmt >ztypes_$GOOSARCH.go"; fi
+	if [ -n "$mktypes" ]; then echo "$mktypes types_$GOOS.go |go run mkpost.go >ztypes_$GOOSARCH.go"; fi
 ) | $run

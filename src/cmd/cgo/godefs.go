@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -41,7 +41,7 @@ func (p *Package) godefs(f *File, srcfile string) string {
 				continue
 			}
 			s := strings.TrimSpace(c.Text[i+len("+godefs map"):])
-			i = strings.Index(s, " ")
+			i = strings.IndexByte(s, ' ')
 			if i < 0 {
 				fmt.Fprintf(os.Stderr, "invalid +godefs map comment: %s\n", c.Text)
 				continue

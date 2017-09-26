@@ -29,17 +29,15 @@ const (
 )
 
 type Package struct {
-	writer     io.Writer // Destination for output.
-	name       string    // Package name, json for encoding/json.
-	userPath   string    // String the user used to find this package.
-	unexported bool
-	matchCase  bool
-	pkg        *ast.Package // Parsed package.
-	file       *ast.File    // Merged from all files in the package
-	doc        *doc.Package
-	build      *build.Package
-	fs         *token.FileSet // Needed for printing.
-	buf        bytes.Buffer
+	writer   io.Writer    // Destination for output.
+	name     string       // Package name, json for encoding/json.
+	userPath string       // String the user used to find this package.
+	pkg      *ast.Package // Parsed package.
+	file     *ast.File    // Merged from all files in the package
+	doc      *doc.Package
+	build    *build.Package
+	fs       *token.FileSet // Needed for printing.
+	buf      bytes.Buffer
 }
 
 type PackageError string // type returned by pkg.Fatalf.
@@ -196,60 +194,194 @@ func (pkg *Package) emit(comment string, node ast.Node) {
 	}
 }
 
-var formatBuf bytes.Buffer // Reusable to avoid allocation.
-
-// formatNode is a helper function for printing.
-func (pkg *Package) formatNode(node ast.Node) []byte {
-	formatBuf.Reset()
-	format.Node(&formatBuf, pkg.fs, node)
-	return formatBuf.Bytes()
+// oneLineNode returns a one-line summary of the given input node.
+func (pkg *Package) oneLineNode(node ast.Node) string {
+	const maxDepth = 10
+	return pkg.oneLineNodeDepth(node, maxDepth)
 }
 
-// oneLineFunc prints a function declaration as a single line.
-func (pkg *Package) oneLineFunc(decl *ast.FuncDecl) {
-	decl.Doc = nil
-	decl.Body = nil
-	pkg.emit("", decl)
-}
-
-// oneLineValueGenDecl prints a var or const declaration as a single line.
-func (pkg *Package) oneLineValueGenDecl(decl *ast.GenDecl) {
-	decl.Doc = nil
-	dotDotDot := ""
-	if len(decl.Specs) > 1 {
-		dotDotDot = " ..."
+// oneLineNodeDepth returns a one-line summary of the given input node.
+// The depth specifies the maximum depth when traversing the AST.
+func (pkg *Package) oneLineNodeDepth(node ast.Node, depth int) string {
+	const dotDotDot = "..."
+	if depth == 0 {
+		return dotDotDot
 	}
-	// Find the first relevant spec.
-	for i, spec := range decl.Specs {
-		valueSpec := spec.(*ast.ValueSpec) // Must succeed; we can't mix types in one genDecl.
-		if !isExported(valueSpec.Names[0].Name) {
-			continue
+	depth--
+
+	switch n := node.(type) {
+	case nil:
+		return ""
+
+	case *ast.GenDecl:
+		// Formats const and var declarations.
+		trailer := ""
+		if len(n.Specs) > 1 {
+			trailer = " " + dotDotDot
 		}
+
+		// Find the first relevant spec.
 		typ := ""
-		if valueSpec.Type != nil {
-			typ = fmt.Sprintf(" %s", pkg.formatNode(valueSpec.Type))
+		for i, spec := range n.Specs {
+			valueSpec := spec.(*ast.ValueSpec) // Must succeed; we can't mix types in one GenDecl.
+
+			// The type name may carry over from a previous specification in the
+			// case of constants and iota.
+			if valueSpec.Type != nil {
+				typ = fmt.Sprintf(" %s", pkg.oneLineNodeDepth(valueSpec.Type, depth))
+			} else if len(valueSpec.Values) > 0 {
+				typ = ""
+			}
+
+			if !isExported(valueSpec.Names[0].Name) {
+				continue
+			}
+			val := ""
+			if i < len(valueSpec.Values) && valueSpec.Values[i] != nil {
+				val = fmt.Sprintf(" = %s", pkg.oneLineNodeDepth(valueSpec.Values[i], depth))
+			}
+			return fmt.Sprintf("%s %s%s%s%s", n.Tok, valueSpec.Names[0], typ, val, trailer)
 		}
-		val := ""
-		if i < len(valueSpec.Values) && valueSpec.Values[i] != nil {
-			val = fmt.Sprintf(" = %s", pkg.formatNode(valueSpec.Values[i]))
+		return ""
+
+	case *ast.FuncDecl:
+		// Formats func declarations.
+		name := n.Name.Name
+		recv := pkg.oneLineNodeDepth(n.Recv, depth)
+		if len(recv) > 0 {
+			recv = "(" + recv + ") "
 		}
-		pkg.Printf("%s %s%s%s%s\n", decl.Tok, valueSpec.Names[0], typ, val, dotDotDot)
-		break
+		fnc := pkg.oneLineNodeDepth(n.Type, depth)
+		if strings.Index(fnc, "func") == 0 {
+			fnc = fnc[4:]
+		}
+		return fmt.Sprintf("func %s%s%s", recv, name, fnc)
+
+	case *ast.TypeSpec:
+		sep := " "
+		if n.Assign.IsValid() {
+			sep = " = "
+		}
+		return fmt.Sprintf("type %s%s%s", n.Name.Name, sep, pkg.oneLineNodeDepth(n.Type, depth))
+
+	case *ast.FuncType:
+		var params []string
+		if n.Params != nil {
+			for _, field := range n.Params.List {
+				params = append(params, pkg.oneLineField(field, depth))
+			}
+		}
+		needParens := false
+		var results []string
+		if n.Results != nil {
+			needParens = needParens || len(n.Results.List) > 1
+			for _, field := range n.Results.List {
+				needParens = needParens || len(field.Names) > 0
+				results = append(results, pkg.oneLineField(field, depth))
+			}
+		}
+
+		param := joinStrings(params)
+		if len(results) == 0 {
+			return fmt.Sprintf("func(%s)", param)
+		}
+		result := joinStrings(results)
+		if !needParens {
+			return fmt.Sprintf("func(%s) %s", param, result)
+		}
+		return fmt.Sprintf("func(%s) (%s)", param, result)
+
+	case *ast.StructType:
+		if n.Fields == nil || len(n.Fields.List) == 0 {
+			return "struct{}"
+		}
+		return "struct{ ... }"
+
+	case *ast.InterfaceType:
+		if n.Methods == nil || len(n.Methods.List) == 0 {
+			return "interface{}"
+		}
+		return "interface{ ... }"
+
+	case *ast.FieldList:
+		if n == nil || len(n.List) == 0 {
+			return ""
+		}
+		if len(n.List) == 1 {
+			return pkg.oneLineField(n.List[0], depth)
+		}
+		return dotDotDot
+
+	case *ast.FuncLit:
+		return pkg.oneLineNodeDepth(n.Type, depth) + " { ... }"
+
+	case *ast.CompositeLit:
+		typ := pkg.oneLineNodeDepth(n.Type, depth)
+		if len(n.Elts) == 0 {
+			return fmt.Sprintf("%s{}", typ)
+		}
+		return fmt.Sprintf("%s{ %s }", typ, dotDotDot)
+
+	case *ast.ArrayType:
+		length := pkg.oneLineNodeDepth(n.Len, depth)
+		element := pkg.oneLineNodeDepth(n.Elt, depth)
+		return fmt.Sprintf("[%s]%s", length, element)
+
+	case *ast.MapType:
+		key := pkg.oneLineNodeDepth(n.Key, depth)
+		value := pkg.oneLineNodeDepth(n.Value, depth)
+		return fmt.Sprintf("map[%s]%s", key, value)
+
+	case *ast.CallExpr:
+		fnc := pkg.oneLineNodeDepth(n.Fun, depth)
+		var args []string
+		for _, arg := range n.Args {
+			args = append(args, pkg.oneLineNodeDepth(arg, depth))
+		}
+		return fmt.Sprintf("%s(%s)", fnc, joinStrings(args))
+
+	case *ast.UnaryExpr:
+		return fmt.Sprintf("%s%s", n.Op, pkg.oneLineNodeDepth(n.X, depth))
+
+	case *ast.Ident:
+		return n.Name
+
+	default:
+		// As a fallback, use default formatter for all unknown node types.
+		buf := new(bytes.Buffer)
+		format.Node(buf, pkg.fs, node)
+		s := buf.String()
+		if strings.Contains(s, "\n") {
+			return dotDotDot
+		}
+		return s
 	}
 }
 
-// oneLineTypeDecl prints a type declaration as a single line.
-func (pkg *Package) oneLineTypeDecl(spec *ast.TypeSpec) {
-	spec.Doc = nil
-	spec.Comment = nil
-	switch spec.Type.(type) {
-	case *ast.InterfaceType:
-		pkg.Printf("type %s interface { ... }\n", spec.Name)
-	case *ast.StructType:
-		pkg.Printf("type %s struct { ... }\n", spec.Name)
-	default:
-		pkg.Printf("type %s %s\n", spec.Name, pkg.formatNode(spec.Type))
+// oneLineField returns a one-line summary of the field.
+func (pkg *Package) oneLineField(field *ast.Field, depth int) string {
+	var names []string
+	for _, name := range field.Names {
+		names = append(names, name.Name)
 	}
+	if len(names) == 0 {
+		return pkg.oneLineNodeDepth(field.Type, depth)
+	}
+	return joinStrings(names) + " " + pkg.oneLineNodeDepth(field.Type, depth)
+}
+
+// joinStrings formats the input as a comma-separated list,
+// but truncates the list at some reasonable length if necessary.
+func joinStrings(ss []string) string {
+	var n int
+	for i, s := range ss {
+		n += len(s) + len(", ")
+		if n > punchedCardWidth {
+			ss = append(ss[:i:i], "...")
+			break
+		}
+	}
+	return strings.Join(ss, ", ")
 }
 
 // packageDoc prints the docs for the package (package doc plus one-liners of the rest).
@@ -268,9 +400,9 @@ func (pkg *Package) packageDoc() {
 	}
 
 	pkg.newlines(2) // Guarantee blank line before the components.
-	pkg.valueSummary(pkg.doc.Consts)
-	pkg.valueSummary(pkg.doc.Vars)
-	pkg.funcSummary(pkg.doc.Funcs)
+	pkg.valueSummary(pkg.doc.Consts, false)
+	pkg.valueSummary(pkg.doc.Vars, false)
+	pkg.funcSummary(pkg.doc.Funcs, false)
 	pkg.typeSummary()
 	pkg.bugs()
 }
@@ -304,30 +436,82 @@ func (pkg *Package) packageClause(checkUserPath bool) {
 }
 
 // valueSummary prints a one-line summary for each set of values and constants.
-func (pkg *Package) valueSummary(values []*doc.Value) {
-	for _, value := range values {
-		pkg.oneLineValueGenDecl(value.Decl)
+// If all the types in a constant or variable declaration belong to the same
+// type they can be printed by typeSummary, and so can be suppressed here.
+func (pkg *Package) valueSummary(values []*doc.Value, showGrouped bool) {
+	var isGrouped map[*doc.Value]bool
+	if !showGrouped {
+		isGrouped = make(map[*doc.Value]bool)
+		for _, typ := range pkg.doc.Types {
+			if !isExported(typ.Name) {
+				continue
+			}
+			for _, c := range typ.Consts {
+				isGrouped[c] = true
+			}
+			for _, v := range typ.Vars {
+				isGrouped[v] = true
+			}
+		}
 	}
-}
 
-// funcSummary prints a one-line summary for each function.
-func (pkg *Package) funcSummary(funcs []*doc.Func) {
-	for _, fun := range funcs {
-		decl := fun.Decl
-		// Exported functions only. The go/doc package does not include methods here.
-		if isExported(fun.Name) {
-			pkg.oneLineFunc(decl)
+	for _, value := range values {
+		if !isGrouped[value] {
+			if decl := pkg.oneLineNode(value.Decl); decl != "" {
+				pkg.Printf("%s\n", decl)
+			}
 		}
 	}
 }
 
-// typeSummary prints a one-line summary for each type.
+// funcSummary prints a one-line summary for each function. Constructors
+// are printed by typeSummary, below, and so can be suppressed here.
+func (pkg *Package) funcSummary(funcs []*doc.Func, showConstructors bool) {
+	// First, identify the constructors. Don't bother figuring out if they're exported.
+	var isConstructor map[*doc.Func]bool
+	if !showConstructors {
+		isConstructor = make(map[*doc.Func]bool)
+		for _, typ := range pkg.doc.Types {
+			if isExported(typ.Name) {
+				for _, f := range typ.Funcs {
+					isConstructor[f] = true
+				}
+			}
+		}
+	}
+	for _, fun := range funcs {
+		// Exported functions only. The go/doc package does not include methods here.
+		if isExported(fun.Name) {
+			if !isConstructor[fun] {
+				pkg.Printf("%s\n", pkg.oneLineNode(fun.Decl))
+			}
+		}
+	}
+}
+
+// typeSummary prints a one-line summary for each type, followed by its constructors.
 func (pkg *Package) typeSummary() {
 	for _, typ := range pkg.doc.Types {
 		for _, spec := range typ.Decl.Specs {
 			typeSpec := spec.(*ast.TypeSpec) // Must succeed.
 			if isExported(typeSpec.Name.Name) {
-				pkg.oneLineTypeDecl(typeSpec)
+				pkg.Printf("%s\n", pkg.oneLineNode(typeSpec))
+				// Now print the consts, vars, and constructors.
+				for _, c := range typ.Consts {
+					if decl := pkg.oneLineNode(c.Decl); decl != "" {
+						pkg.Printf(indent+"%s\n", decl)
+					}
+				}
+				for _, v := range typ.Vars {
+					if decl := pkg.oneLineNode(v.Decl); decl != "" {
+						pkg.Printf(indent+"%s\n", decl)
+					}
+				}
+				for _, constructor := range typ.Funcs {
+					if isExported(constructor.Name) {
+						pkg.Printf(indent+"%s\n", pkg.oneLineNode(constructor.Decl))
+					}
+				}
 			}
 		}
 	}
@@ -417,11 +601,29 @@ func (pkg *Package) symbolDoc(symbol string) bool {
 		// It's an unlikely scenario, probably not worth the trouble.
 		// TODO: Would be nice if go/doc did this for us.
 		specs := make([]ast.Spec, 0, len(value.Decl.Specs))
+		var typ ast.Expr
 		for _, spec := range value.Decl.Specs {
 			vspec := spec.(*ast.ValueSpec)
+
+			// The type name may carry over from a previous specification in the
+			// case of constants and iota.
+			if vspec.Type != nil {
+				typ = vspec.Type
+			}
+
 			for _, ident := range vspec.Names {
 				if isExported(ident.Name) {
+					if vspec.Type == nil && vspec.Values == nil && typ != nil {
+						// This a standalone identifier, as in the case of iota usage.
+						// Thus, assume the type comes from the previous type.
+						vspec.Type = &ast.Ident{
+							Name:    string(pkg.oneLineNode(typ)),
+							NamePos: vspec.End() - 1,
+						}
+					}
+
 					specs = append(specs, vspec)
+					typ = nil // Only inject type on first exported identifier
 					break
 				}
 			}
@@ -453,10 +655,10 @@ func (pkg *Package) symbolDoc(symbol string) bool {
 		if len(typ.Consts) > 0 || len(typ.Vars) > 0 || len(typ.Funcs) > 0 || len(typ.Methods) > 0 {
 			pkg.Printf("\n")
 		}
-		pkg.valueSummary(typ.Consts)
-		pkg.valueSummary(typ.Vars)
-		pkg.funcSummary(typ.Funcs)
-		pkg.funcSummary(typ.Methods)
+		pkg.valueSummary(typ.Consts, true)
+		pkg.valueSummary(typ.Vars, true)
+		pkg.funcSummary(typ.Funcs, true)
+		pkg.funcSummary(typ.Methods, true)
 		found = true
 	}
 	if !found {
@@ -476,20 +678,54 @@ func trimUnexportedElems(spec *ast.TypeSpec) {
 	}
 	switch typ := spec.Type.(type) {
 	case *ast.StructType:
-		typ.Fields = trimUnexportedFields(typ.Fields, "fields")
+		typ.Fields = trimUnexportedFields(typ.Fields, false)
 	case *ast.InterfaceType:
-		typ.Methods = trimUnexportedFields(typ.Methods, "methods")
+		typ.Methods = trimUnexportedFields(typ.Methods, true)
 	}
 }
 
 // trimUnexportedFields returns the field list trimmed of unexported fields.
-func trimUnexportedFields(fields *ast.FieldList, what string) *ast.FieldList {
+func trimUnexportedFields(fields *ast.FieldList, isInterface bool) *ast.FieldList {
+	what := "methods"
+	if !isInterface {
+		what = "fields"
+	}
+
 	trimmed := false
 	list := make([]*ast.Field, 0, len(fields.List))
 	for _, field := range fields.List {
+		names := field.Names
+		if len(names) == 0 {
+			// Embedded type. Use the name of the type. It must be of type ident or *ident.
+			// Nothing else is allowed.
+			switch ident := field.Type.(type) {
+			case *ast.Ident:
+				if isInterface && ident.Name == "error" && ident.Obj == nil {
+					// For documentation purposes, we consider the builtin error
+					// type special when embedded in an interface, such that it
+					// always gets shown publicly.
+					list = append(list, field)
+					continue
+				}
+				names = []*ast.Ident{ident}
+			case *ast.StarExpr:
+				// Must have the form *identifier.
+				// This is only valid on embedded types in structs.
+				if ident, ok := ident.X.(*ast.Ident); ok && !isInterface {
+					names = []*ast.Ident{ident}
+				}
+			case *ast.SelectorExpr:
+				// An embedded type may refer to a type in another package.
+				names = []*ast.Ident{ident.Sel}
+			}
+			if names == nil {
+				// Can only happen if AST is incorrect. Safe to continue with a nil list.
+				log.Print("invalid program: unexpected type for embedded field")
+			}
+		}
 		// Trims if any is unexported. Good enough in practice.
 		ok := true
-		for _, name := range field.Names {
+		for _, name := range names {
 			if !isExported(name.Name) {
 				trimmed = true
 				ok = false
@@ -537,14 +773,105 @@ func (pkg *Package) printMethodDoc(symbol, method string) bool {
 	}
 	found := false
 	for _, typ := range types {
-		for _, meth := range typ.Methods {
-			if match(method, meth.Name) {
-				decl := meth.Decl
-				decl.Body = nil
-				pkg.emit(meth.Doc, decl)
+		if len(typ.Methods) > 0 {
+			for _, meth := range typ.Methods {
+				if match(method, meth.Name) {
+					decl := meth.Decl
+					decl.Body = nil
+					pkg.emit(meth.Doc, decl)
+					found = true
+				}
+			}
+			continue
+		}
+		// Type may be an interface. The go/doc package does not attach
+		// an interface's methods to the doc.Type. We need to dig around.
+		spec := pkg.findTypeSpec(typ.Decl, typ.Name)
+		inter, ok := spec.Type.(*ast.InterfaceType)
+		if !ok {
+			// Not an interface type.
+			continue
+		}
+		for _, iMethod := range inter.Methods.List {
+			// This is an interface, so there can be only one name.
+			// TODO: Anonymous methods (embedding)
+			if len(iMethod.Names) == 0 {
+				continue
+			}
+			name := iMethod.Names[0].Name
+			if match(method, name) {
+				if iMethod.Doc != nil {
+					for _, comment := range iMethod.Doc.List {
+						doc.ToText(&pkg.buf, comment.Text, "", indent, indentedWidth)
+					}
+				}
+				s := pkg.oneLineNode(iMethod.Type)
+				// Hack: s starts "func" but there is no name present.
+				// We could instead build a FuncDecl but it's not worthwhile.
+				lineComment := ""
+				if iMethod.Comment != nil {
+					lineComment = fmt.Sprintf("  %s", iMethod.Comment.List[0].Text)
+				}
+				pkg.Printf("func %s%s%s\n", name, s[4:], lineComment)
 				found = true
 			}
 		}
+	}
+	return found
+}
+
+// printFieldDoc prints the docs for matches of symbol.fieldName.
+// It reports whether it found any field.
+// Both symbol and fieldName must be non-empty or it returns false.
+func (pkg *Package) printFieldDoc(symbol, fieldName string) bool {
+	if symbol == "" || fieldName == "" {
+		return false
+	}
+	defer pkg.flush()
+	types := pkg.findTypes(symbol)
+	if types == nil {
+		pkg.Fatalf("symbol %s is not a type in package %s installed in %q", symbol, pkg.name, pkg.build.ImportPath)
+	}
+	found := false
+	numUnmatched := 0
+	for _, typ := range types {
+		// Type must be a struct.
+		spec := pkg.findTypeSpec(typ.Decl, typ.Name)
+		structType, ok := spec.Type.(*ast.StructType)
+		if !ok {
+			// Not a struct type.
+			continue
+		}
+		for _, field := range structType.Fields.List {
+			// TODO: Anonymous fields.
+			for _, name := range field.Names {
+				if !match(fieldName, name.Name) {
+					numUnmatched++
+					continue
+				}
+				if !found {
+					pkg.Printf("type %s struct {\n", typ.Name)
+				}
+				if field.Doc != nil {
+					for _, comment := range field.Doc.List {
+						doc.ToText(&pkg.buf, comment.Text, indent, indent, indentedWidth)
+					}
+				}
+				s := pkg.oneLineNode(field.Type)
+				lineComment := ""
+				if field.Comment != nil {
+					lineComment = fmt.Sprintf("  %s", field.Comment.List[0].Text)
+				}
+				pkg.Printf("%s%s %s%s\n", indent, name, s, lineComment)
+				found = true
+			}
+		}
+	}
+	if found {
+		if numUnmatched > 0 {
+			pkg.Printf("\n    // ... other fields elided ...\n")
+		}
+		pkg.Printf("}\n")
 	}
 	return found
 }
@@ -553,6 +880,12 @@ func (pkg *Package) printMethodDoc(symbol, method string) bool {
 func (pkg *Package) methodDoc(symbol, method string) bool {
 	defer pkg.flush()
 	return pkg.printMethodDoc(symbol, method)
+}
+
+// fieldDoc prints the docs for matches of symbol.field.
+func (pkg *Package) fieldDoc(symbol, field string) bool {
+	defer pkg.flush()
+	return pkg.printFieldDoc(symbol, field)
 }
 
 // match reports whether the user's symbol matches the program's.

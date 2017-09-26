@@ -43,6 +43,8 @@ var arm64Jump = map[string]bool{
 	"CBNZ":  true,
 	"CBNZW": true,
 	"JMP":   true,
+	"TBNZ":  true,
+	"TBZ":   true,
 }
 
 func jumpArm64(word string) bool {
@@ -51,10 +53,12 @@ func jumpArm64(word string) bool {
 
 // IsARM64CMP reports whether the op (as defined by an arm.A* constant) is
 // one of the comparison instructions that require special handling.
-func IsARM64CMP(op int) bool {
+func IsARM64CMP(op obj.As) bool {
 	switch op {
 	case arm64.ACMN, arm64.ACMP, arm64.ATST,
-		arm64.ACMNW, arm64.ACMPW, arm64.ATSTW:
+		arm64.ACMNW, arm64.ACMPW, arm64.ATSTW,
+		arm64.AFCMPS, arm64.AFCMPD,
+		arm64.AFCMPES, arm64.AFCMPED:
 		return true
 	}
 	return false
@@ -63,9 +67,10 @@ func IsARM64CMP(op int) bool {
 // IsARM64STLXR reports whether the op (as defined by an arm64.A*
 // constant) is one of the STLXR-like instructions that require special
 // handling.
-func IsARM64STLXR(op int) bool {
+func IsARM64STLXR(op obj.As) bool {
 	switch op {
-	case arm64.ASTLXRB, arm64.ASTLXRH, arm64.ASTLXRW, arm64.ASTLXR:
+	case arm64.ASTLXRB, arm64.ASTLXRH, arm64.ASTLXRW, arm64.ASTLXR,
+		arm64.ASTXRB, arm64.ASTXRH, arm64.ASTXRW, arm64.ASTXR:
 		return true
 	}
 	return false

@@ -3,6 +3,23 @@
 // license that can be found in the LICENSE file.
 
 // Package rsa implements RSA encryption as specified in PKCS#1.
+//
+// RSA is a single, fundamental operation that is used in this package to
+// implement either public-key encryption or public-key signatures.
+//
+// The original specification for encryption and signatures with RSA is PKCS#1
+// and the terms "RSA encryption" and "RSA signatures" by default refer to
+// PKCS#1 version 1.5. However, that specification has flaws and new designs
+// should use version two, usually called by just OAEP and PSS, where
+// possible.
+//
+// Two sets of interfaces are included in this package. When a more abstract
+// interface isn't necessary, there are functions for encrypting/decrypting
+// with v1.5/OAEP and signing/verifying with v1.5/PSS. If one needs to abstract
+// over the public-key primitive, the PrivateKey struct implements the
+// Decrypter and Signer interfaces from the crypto package.
+//
+// The RSA operations in this package are not implemented using constant-time algorithms.
 package rsa
 
 import (
@@ -12,6 +29,7 @@ import (
 	"errors"
 	"hash"
 	"io"
+	"math"
 	"math/big"
 )
 
@@ -176,7 +194,7 @@ func (priv *PrivateKey) Validate() error {
 
 // GenerateKey generates an RSA keypair of the given bit size using the
 // random source random (for example, crypto/rand.Reader).
-func GenerateKey(random io.Reader, bits int) (priv *PrivateKey, err error) {
+func GenerateKey(random io.Reader, bits int) (*PrivateKey, error) {
 	return GenerateMultiPrimeKey(random, 2, bits)
 }
 
@@ -191,12 +209,27 @@ func GenerateKey(random io.Reader, bits int) (priv *PrivateKey, err error) {
 //
 // [1] US patent 4405829 (1972, expired)
 // [2] http://www.cacr.math.uwaterloo.ca/techreports/2006/cacr2006-16.pdf
-func GenerateMultiPrimeKey(random io.Reader, nprimes int, bits int) (priv *PrivateKey, err error) {
-	priv = new(PrivateKey)
+func GenerateMultiPrimeKey(random io.Reader, nprimes int, bits int) (*PrivateKey, error) {
+	priv := new(PrivateKey)
 	priv.E = 65537
 
 	if nprimes < 2 {
 		return nil, errors.New("crypto/rsa: GenerateMultiPrimeKey: nprimes must be >= 2")
+	}
+
+	if bits < 64 {
+		primeLimit := float64(uint64(1) << uint(bits/nprimes))
+		// pi approximates the number of primes less than primeLimit
+		pi := primeLimit / (math.Log(primeLimit) - 1)
+		// Generated primes start with 11 (in binary) so we can only
+		// use a quarter of them.
+		pi /= 4
+		// Use a factor of two to ensure that key generation terminates
+		// in a reasonable amount of time.
+		pi /= 2
+		if pi <= float64(nprimes) {
+			return nil, errors.New("crypto/rsa: too few primes of given length to generate an RSA key")
+		}
 	}
 
 	primes := make([]*big.Int, nprimes)
@@ -219,6 +252,7 @@ NextSetOfPrimes:
 			todo += (nprimes - 2) / 5
 		}
 		for i := 0; i < nprimes; i++ {
+			var err error
 			primes[i], err = rand.Prime(random, todo/(nprimes-i))
 			if err != nil {
 				return nil, err
@@ -252,9 +286,8 @@ NextSetOfPrimes:
 
 		g := new(big.Int)
 		priv.D = new(big.Int)
-		y := new(big.Int)
 		e := big.NewInt(int64(priv.E))
-		g.GCD(priv.D, y, e, totient)
+		g.GCD(priv.D, nil, e, totient)
 
 		if g.Cmp(bigOne) == 0 {
 			if priv.D.Sign() < 0 {
@@ -268,7 +301,7 @@ NextSetOfPrimes:
 	}
 
 	priv.Precompute()
-	return
+	return priv, nil
 }
 
 // incCounter increments a four byte, big-endian counter.
@@ -317,17 +350,30 @@ func encrypt(c *big.Int, pub *PublicKey, m *big.Int) *big.Int {
 }
 
 // EncryptOAEP encrypts the given message with RSA-OAEP.
-// The message must be no longer than the length of the public modulus less
-// twice the hash length plus 2.
-func EncryptOAEP(hash hash.Hash, random io.Reader, pub *PublicKey, msg []byte, label []byte) (out []byte, err error) {
+//
+// OAEP is parameterised by a hash function that is used as a random oracle.
+// Encryption and decryption of a given message must use the same hash function
+// and sha256.New() is a reasonable choice.
+//
+// The random parameter is used as a source of entropy to ensure that
+// encrypting the same message twice doesn't result in the same ciphertext.
+//
+// The label parameter may contain arbitrary data that will not be encrypted,
+// but which gives important context to the message. For example, if a given
+// public key is used to decrypt two types of messages then distinct label
+// values could be used to ensure that a ciphertext for one purpose cannot be
+// used for another by an attacker. If not required it can be empty.
+//
+// The message must be no longer than the length of the public modulus minus
+// twice the hash length, minus a further 2.
+func EncryptOAEP(hash hash.Hash, random io.Reader, pub *PublicKey, msg []byte, label []byte) ([]byte, error) {
 	if err := checkPub(pub); err != nil {
 		return nil, err
 	}
 	hash.Reset()
 	k := (pub.N.BitLen() + 7) / 8
 	if len(msg) > k-2*hash.Size()-2 {
-		err = ErrMessageTooLong
-		return
+		return nil, ErrMessageTooLong
 	}
 
 	hash.Write(label)
@@ -342,9 +388,9 @@ func EncryptOAEP(hash hash.Hash, random io.Reader, pub *PublicKey, msg []byte, l
 	db[len(db)-len(msg)-1] = 1
 	copy(db[len(db)-len(msg):], msg)
 
-	_, err = io.ReadFull(random, seed)
+	_, err := io.ReadFull(random, seed)
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	mgf1XOR(db, hash, seed)
@@ -353,7 +399,7 @@ func EncryptOAEP(hash hash.Hash, random io.Reader, pub *PublicKey, msg []byte, l
 	m := new(big.Int)
 	m.SetBytes(em)
 	c := encrypt(new(big.Int), pub, m)
-	out = c.Bytes()
+	out := c.Bytes()
 
 	if len(out) < k {
 		// If the output is too small, we need to left-pad with zeros.
@@ -362,7 +408,7 @@ func EncryptOAEP(hash hash.Hash, random io.Reader, pub *PublicKey, msg []byte, l
 		out = t
 	}
 
-	return
+	return out, nil
 }
 
 // ErrDecryption represents a failure to decrypt a message.
@@ -378,8 +424,7 @@ var ErrVerification = errors.New("crypto/rsa: verification error")
 func modInverse(a, n *big.Int) (ia *big.Int, ok bool) {
 	g := new(big.Int)
 	x := new(big.Int)
-	y := new(big.Int)
-	g.GCD(x, y, a, n)
+	g.GCD(x, nil, a, n)
 	if g.Cmp(bigOne) != 0 {
 		// In this case, a and n aren't coprime and we cannot calculate
 		// the inverse. This happens because the values of n are nearly
@@ -436,6 +481,9 @@ func decrypt(random io.Reader, priv *PrivateKey, c *big.Int) (m *big.Int, err er
 		err = ErrDecryption
 		return
 	}
+	if priv.N.Sign() == 0 {
+		return nil, ErrDecryption
+	}
 
 	var ir *big.Int
 	if random != nil {
@@ -461,7 +509,7 @@ func decrypt(random io.Reader, priv *PrivateKey, c *big.Int) (m *big.Int, err er
 			}
 		}
 		bigE := big.NewInt(int64(priv.E))
-		rpowe := new(big.Int).Exp(r, bigE, priv.N)
+		rpowe := new(big.Int).Exp(r, bigE, priv.N) // N != 0
 		cCopy := new(big.Int).Set(c)
 		cCopy.Mul(cCopy, rpowe)
 		cCopy.Mod(cCopy, priv.N)
@@ -506,24 +554,48 @@ func decrypt(random io.Reader, priv *PrivateKey, c *big.Int) (m *big.Int, err er
 	return
 }
 
+func decryptAndCheck(random io.Reader, priv *PrivateKey, c *big.Int) (m *big.Int, err error) {
+	m, err = decrypt(random, priv, c)
+	if err != nil {
+		return nil, err
+	}
+
+	// In order to defend against errors in the CRT computation, m^e is
+	// calculated, which should match the original ciphertext.
+	check := encrypt(new(big.Int), &priv.PublicKey, m)
+	if c.Cmp(check) != 0 {
+		return nil, errors.New("rsa: internal error")
+	}
+	return m, nil
+}
+
 // DecryptOAEP decrypts ciphertext using RSA-OAEP.
-// If random != nil, DecryptOAEP uses RSA blinding to avoid timing side-channel attacks.
-func DecryptOAEP(hash hash.Hash, random io.Reader, priv *PrivateKey, ciphertext []byte, label []byte) (msg []byte, err error) {
+
+// OAEP is parameterised by a hash function that is used as a random oracle.
+// Encryption and decryption of a given message must use the same hash function
+// and sha256.New() is a reasonable choice.
+//
+// The random parameter, if not nil, is used to blind the private-key operation
+// and avoid timing side-channel attacks. Blinding is purely internal to this
+// function – the random data need not match that used when encrypting.
+//
+// The label parameter must match the value given when encrypting. See
+// EncryptOAEP for details.
+func DecryptOAEP(hash hash.Hash, random io.Reader, priv *PrivateKey, ciphertext []byte, label []byte) ([]byte, error) {
 	if err := checkPub(&priv.PublicKey); err != nil {
 		return nil, err
 	}
 	k := (priv.N.BitLen() + 7) / 8
 	if len(ciphertext) > k ||
 		k < hash.Size()*2+2 {
-		err = ErrDecryption
-		return
+		return nil, ErrDecryption
 	}
 
 	c := new(big.Int).SetBytes(ciphertext)
 
 	m, err := decrypt(random, priv, c)
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	hash.Write(label)
@@ -571,12 +643,10 @@ func DecryptOAEP(hash hash.Hash, random io.Reader, priv *PrivateKey, ciphertext 
 	}
 
 	if firstByteIsZero&lHash2Good&^invalid&^lookingForIndex != 1 {
-		err = ErrDecryption
-		return
+		return nil, ErrDecryption
 	}
 
-	msg = rest[index+1:]
-	return
+	return rest[index+1:], nil
 }
 
 // leftPad returns a new slice of length size. The contents of input are right

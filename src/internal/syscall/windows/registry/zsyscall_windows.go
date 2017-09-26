@@ -2,14 +2,42 @@
 
 package registry
 
-import "unsafe"
-import "syscall"
+import (
+	"internal/syscall/windows/sysdll"
+	"syscall"
+	"unsafe"
+)
 
 var _ unsafe.Pointer
 
+// Do the interface allocations only once for common
+// Errno values.
+const (
+	errnoERROR_IO_PENDING = 997
+)
+
 var (
-	modadvapi32 = syscall.NewLazyDLL("advapi32.dll")
-	modkernel32 = syscall.NewLazyDLL("kernel32.dll")
+	errERROR_IO_PENDING error = syscall.Errno(errnoERROR_IO_PENDING)
+)
+
+// errnoErr returns common boxed Errno values, to prevent
+// allocations at runtime.
+func errnoErr(e syscall.Errno) error {
+	switch e {
+	case 0:
+		return nil
+	case errnoERROR_IO_PENDING:
+		return errERROR_IO_PENDING
+	}
+	// TODO: add more here, after collecting data on the common
+	// error values see on Windows. (perhaps when running
+	// all.bat?)
+	return e
+}
+
+var (
+	modadvapi32 = syscall.NewLazyDLL(sysdll.Add("advapi32.dll"))
+	modkernel32 = syscall.NewLazyDLL(sysdll.Add("kernel32.dll"))
 
 	procRegCreateKeyExW           = modadvapi32.NewProc("RegCreateKeyExW")
 	procRegDeleteKeyW             = modadvapi32.NewProc("RegDeleteKeyW")
@@ -73,7 +101,7 @@ func expandEnvironmentStrings(src *uint16, dst *uint16, size uint32) (n uint32, 
 	n = uint32(r0)
 	if n == 0 {
 		if e1 != 0 {
-			err = error(e1)
+			err = errnoErr(e1)
 		} else {
 			err = syscall.EINVAL
 		}

@@ -1,4 +1,4 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -143,6 +143,21 @@ type Dysymtab struct {
 	IndirectSyms []uint32 // indices into Symtab.Syms
 }
 
+// A Rpath represents a Mach-O rpath command.
+type Rpath struct {
+	LoadBytes
+	Path string
+}
+
+// A Symbol is a Mach-O 32-bit or 64-bit symbol table entry.
+type Symbol struct {
+	Name  string
+	Type  uint8
+	Sect  uint8
+	Desc  uint16
+	Value uint64
+}
+
 /*
  * Mach-O reader
  */
@@ -248,6 +263,19 @@ func NewFile(r io.ReaderAt) (*File, error) {
 		switch cmd {
 		default:
 			f.Loads[i] = LoadBytes(cmddat)
+
+		case LoadCmdRpath:
+			var hdr RpathCmd
+			b := bytes.NewReader(cmddat)
+			if err := binary.Read(b, bo, &hdr); err != nil {
+				return nil, err
+			}
+			l := new(Rpath)
+			if hdr.Path >= uint32(len(cmddat)) {
+				return nil, &FormatError{offset, "invalid path in rpath command", hdr.Path}
+			}
+			l.Path = cstring(cmddat[hdr.Path:])
+			f.Loads[i] = l
 
 		case LoadCmdDylib:
 			var hdr DylibCmd
@@ -474,7 +502,7 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 	// There are many other DWARF sections, but these
 	// are the ones the debug/dwarf package uses.
 	// Don't bother loading others.
-	var names = [...]string{"abbrev", "info", "line", "str"}
+	var names = [...]string{"abbrev", "info", "line", "ranges", "str"}
 	var dat [len(names)][]byte
 	for i, name := range names {
 		name = "__debug_" + name
@@ -489,8 +517,8 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 		dat[i] = b
 	}
 
-	abbrev, info, line, str := dat[0], dat[1], dat[2], dat[3]
-	return dwarf.New(abbrev, nil, nil, info, line, nil, nil, str)
+	abbrev, info, line, ranges, str := dat[0], dat[1], dat[2], dat[3], dat[4]
+	return dwarf.New(abbrev, nil, nil, info, line, nil, ranges, str)
 }
 
 // ImportedSymbols returns the names of all symbols

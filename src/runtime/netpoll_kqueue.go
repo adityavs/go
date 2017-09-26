@@ -23,15 +23,19 @@ var (
 func netpollinit() {
 	kq = kqueue()
 	if kq < 0 {
-		println("netpollinit: kqueue failed with", -kq)
-		throw("netpollinit: kqueue failed")
+		println("runtime: kqueue failed with", -kq)
+		throw("runtime: netpollinit failed")
 	}
 	closeonexec(kq)
 }
 
+func netpolldescriptor() uintptr {
+	return uintptr(kq)
+}
+
 func netpollopen(fd uintptr, pd *pollDesc) int32 {
 	// Arm both EVFILT_READ and EVFILT_WRITE in edge-triggered mode (EV_CLEAR)
-	// for the whole fd lifetime.  The notifications are automatically unregistered
+	// for the whole fd lifetime. The notifications are automatically unregistered
 	// when fd is closed.
 	var ev [2]keventt
 	*(*uintptr)(unsafe.Pointer(&ev[0].ident)) = fd
@@ -56,7 +60,7 @@ func netpollclose(fd uintptr) int32 {
 }
 
 func netpollarm(pd *pollDesc, mode int) {
-	throw("unused")
+	throw("runtime: unused")
 }
 
 // Polls for ready network connections.
@@ -76,7 +80,7 @@ retry:
 	if n < 0 {
 		if n != -_EINTR {
 			println("runtime: kevent on fd", kq, "failed with", -n)
-			throw("kevent failed")
+			throw("runtime: netpoll failed")
 		}
 		goto retry
 	}

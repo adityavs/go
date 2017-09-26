@@ -1,5 +1,5 @@
 // Inferno utils/5l/asm.c
-// http://code.google.com/p/inferno-os/source/browse/utils/5l/asm.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/5l/asm.c
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -33,7 +33,7 @@ package arm
 // Writing object files.
 
 // Inferno utils/5l/l.h
-// http://code.google.com/p/inferno-os/source/browse/utils/5l/l.h
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/5l/l.h
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -42,7 +42,7 @@ package arm
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -63,14 +63,13 @@ package arm
 // THE SOFTWARE.
 
 const (
-	thechar   = '5'
-	MaxAlign  = 8 // max data alignment
-	FuncAlign = 4 // single-instruction alignment
-	MINLC     = 4
+	maxAlign  = 8 // max data alignment
+	minAlign  = 1 // min data alignment
+	funcAlign = 4 // single-instruction alignment
 )
 
 /* Used by ../internal/ld/dwarf.go */
 const (
-	DWARFREGSP = 13
-	DWARFREGLR = 14
+	dwarfRegSP = 13
+	dwarfRegLR = 14
 )

@@ -1,4 +1,4 @@
-// Copyright 2013 The Go Authors.  All rights reserved.
+// Copyright 2013 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -14,7 +14,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 )
+
+func goCmd() string {
+	var exeSuffix string
+	if runtime.GOOS == "windows" {
+		exeSuffix = ".exe"
+	}
+	path := filepath.Join(runtime.GOROOT(), "bin", "go"+exeSuffix)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return "go"
+}
 
 var goroot string
 
@@ -25,8 +38,8 @@ func main() {
 		log.Fatal("No $GOROOT set.")
 	}
 
-	out, err := exec.Command("go", "tool", "api",
-		"-c", file("go1", "go1.1", "go1.2", "go1.3", "go1.4", "go1.5"),
+	out, err := exec.Command(goCmd(), "tool", "api",
+		"-c", file("go1", "go1.1", "go1.2", "go1.3", "go1.4", "go1.5", "go1.6", "go1.7", "go1.8", "go1.9"),
 		"-next", file("next"),
 		"-except", file("except")).CombinedOutput()
 	if err != nil {

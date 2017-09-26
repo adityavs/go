@@ -1,4 +1,4 @@
-// Copyright 2014 The Go Authors.  All rights reserved.
+// Copyright 2014 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -15,13 +15,15 @@ func f() {
 	x = unsafe.Pointer(y) // ERROR "possible misuse of unsafe.Pointer"
 	y = uintptr(x)
 
-	// only allowed pointer arithmetic is ptr +/- num.
+	// only allowed pointer arithmetic is ptr +/-/&^ num.
 	// num+ptr is technically okay but still flagged: write ptr+num instead.
 	x = unsafe.Pointer(uintptr(x) + 1)
 	x = unsafe.Pointer(1 + uintptr(x))          // ERROR "possible misuse of unsafe.Pointer"
 	x = unsafe.Pointer(uintptr(x) + uintptr(x)) // ERROR "possible misuse of unsafe.Pointer"
 	x = unsafe.Pointer(uintptr(x) - 1)
 	x = unsafe.Pointer(1 - uintptr(x)) // ERROR "possible misuse of unsafe.Pointer"
+	x = unsafe.Pointer(uintptr(x) &^ 3)
+	x = unsafe.Pointer(1 &^ uintptr(x)) // ERROR "possible misuse of unsafe.Pointer"
 
 	// certain uses of reflect are okay
 	var v reflect.Value

@@ -1,6 +1,6 @@
 // Derived from Inferno utils/6l/obj.c and utils/6l/span.c
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/obj.c
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/span.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/obj.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/span.c
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -9,7 +9,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -32,85 +32,150 @@
 package ld
 
 import (
-	"cmd/internal/obj"
-	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
-func addlib(ctxt *Link, src string, obj string, pathname string) {
-	name := path.Clean(pathname)
+func (ctxt *Link) readImportCfg(file string) {
+	ctxt.PackageFile = make(map[string]string)
+	ctxt.PackageShlib = make(map[string]string)
+	data, err := ioutil.ReadFile(file)
+	if err != nil {
+		log.Fatalf("-importcfg: %v", err)
+	}
 
+	for lineNum, line := range strings.Split(string(data), "\n") {
+		lineNum++ // 1-based
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		var verb, args string
+		if i := strings.IndexByte(line, ' '); i < 0 {
+			verb = line
+		} else {
+			verb, args = line[:i], strings.TrimSpace(line[i+1:])
+		}
+		var before, after string
+		if i := strings.IndexByte(args, '='); i >= 0 {
+			before, after = args[:i], args[i+1:]
+		}
+		switch verb {
+		default:
+			log.Fatalf("%s:%d: unknown directive %q", file, lineNum, verb)
+		case "packagefile":
+			if before == "" || after == "" {
+				log.Fatalf(`%s:%d: invalid packagefile: syntax is "packagefile path=filename"`, file, lineNum)
+			}
+			ctxt.PackageFile[before] = after
+		case "packageshlib":
+			if before == "" || after == "" {
+				log.Fatalf(`%s:%d: invalid packageshlib: syntax is "packageshlib path=filename"`, file, lineNum)
+			}
+			ctxt.PackageShlib[before] = after
+		}
+	}
+}
+
+func pkgname(lib string) string {
+	name := path.Clean(lib)
 	// runtime.a -> runtime, runtime.6 -> runtime
 	pkg := name
 	if len(pkg) >= 2 && pkg[len(pkg)-2] == '.' {
 		pkg = pkg[:len(pkg)-2]
 	}
+	return pkg
+}
 
-	// already loaded?
-	for i := 0; i < len(ctxt.Library); i++ {
-		if ctxt.Library[i].Pkg == pkg {
-			return
-		}
-	}
+func findlib(ctxt *Link, lib string) (string, bool) {
+	name := path.Clean(lib)
 
 	var pname string
 	isshlib := false
-	if (ctxt.Windows == 0 && strings.HasPrefix(name, "/")) || (ctxt.Windows != 0 && len(name) >= 2 && name[1] == ':') {
-		pname = name
+
+	if *FlagLinkshared && ctxt.PackageShlib[name] != "" {
+		pname = ctxt.PackageShlib[name]
+		isshlib = true
+	} else if ctxt.PackageFile != nil {
+		pname = ctxt.PackageFile[name]
+		if pname == "" {
+			ctxt.Logf("cannot find package %s (using -importcfg)\n", name)
+			return "", false
+		}
 	} else {
-		// try dot, -L "libdir", and then goroot.
-		for _, dir := range ctxt.Libdir {
-			if Linkshared {
-				pname = dir + "/" + pkg + ".shlibname"
+		if filepath.IsAbs(name) {
+			pname = name
+		} else {
+			pkg := pkgname(lib)
+			// try dot, -L "libdir", and then goroot.
+			for _, dir := range ctxt.Libdir {
+				if *FlagLinkshared {
+					pname = dir + "/" + pkg + ".shlibname"
+					if _, err := os.Stat(pname); err == nil {
+						isshlib = true
+						break
+					}
+				}
+				pname = dir + "/" + name
 				if _, err := os.Stat(pname); err == nil {
-					isshlib = true
 					break
 				}
 			}
-			pname = dir + "/" + name
-			if _, err := os.Stat(pname); err == nil {
-				break
-			}
 		}
+		pname = path.Clean(pname)
 	}
 
-	pname = path.Clean(pname)
+	return pname, isshlib
+}
 
-	if ctxt.Debugvlog > 1 && ctxt.Bso != nil {
-		fmt.Fprintf(ctxt.Bso, "%5.2f addlib: %s %s pulls in %s isshlib %v\n", elapsed(), obj, src, pname, isshlib)
+func addlib(ctxt *Link, src string, obj string, lib string) *Library {
+	pkg := pkgname(lib)
+
+	// already loaded?
+	if l := ctxt.LibraryByPkg[pkg]; l != nil {
+		return l
+	}
+
+	pname, isshlib := findlib(ctxt, lib)
+
+	if ctxt.Debugvlog > 1 {
+		ctxt.Logf("%5.2f addlib: %s %s pulls in %s isshlib %v\n", elapsed(), obj, src, pname, isshlib)
 	}
 
 	if isshlib {
-		addlibpath(ctxt, src, obj, "", pkg, pname)
-	} else {
-		addlibpath(ctxt, src, obj, pname, pkg, "")
+		return addlibpath(ctxt, src, obj, "", pkg, pname)
 	}
+	return addlibpath(ctxt, src, obj, pname, pkg, "")
 }
 
 /*
- * add library to library list.
+ * add library to library list, return added library.
  *	srcref: src file referring to package
  *	objref: object file referring to package
  *	file: object file, e.g., /home/rsc/go/pkg/container/vector.a
  *	pkg: package import path, e.g. container/vector
  */
-func addlibpath(ctxt *Link, srcref string, objref string, file string, pkg string, shlibnamefile string) {
-	for i := 0; i < len(ctxt.Library); i++ {
-		if pkg == ctxt.Library[i].Pkg {
-			return
-		}
+func addlibpath(ctxt *Link, srcref string, objref string, file string, pkg string, shlibnamefile string) *Library {
+	if l := ctxt.LibraryByPkg[pkg]; l != nil {
+		return l
 	}
 
-	if ctxt.Debugvlog > 1 && ctxt.Bso != nil {
-		fmt.Fprintf(ctxt.Bso, "%5.2f addlibpath: srcref: %s objref: %s file: %s pkg: %s shlibnamefile: %s\n", obj.Cputime(), srcref, objref, file, pkg, shlibnamefile)
+	if ctxt.Debugvlog > 1 {
+		ctxt.Logf("%5.2f addlibpath: srcref: %s objref: %s file: %s pkg: %s shlibnamefile: %s\n", Cputime(), srcref, objref, file, pkg, shlibnamefile)
 	}
 
-	ctxt.Library = append(ctxt.Library, &Library{})
-	l := ctxt.Library[len(ctxt.Library)-1]
+	l := &Library{}
+	ctxt.LibraryByPkg[pkg] = l
+	ctxt.Library = append(ctxt.Library, l)
 	l.Objref = objref
 	l.Srcref = srcref
 	l.File = file
@@ -118,10 +183,11 @@ func addlibpath(ctxt *Link, srcref string, objref string, file string, pkg strin
 	if shlibnamefile != "" {
 		shlibbytes, err := ioutil.ReadFile(shlibnamefile)
 		if err != nil {
-			Diag("cannot read %s: %v", shlibnamefile, err)
+			Errorf(nil, "cannot read %s: %v", shlibnamefile, err)
 		}
 		l.Shlib = strings.TrimSpace(string(shlibbytes))
 	}
+	return l
 }
 
 func atolwhex(s string) int64 {

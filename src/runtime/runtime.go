@@ -1,4 +1,4 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -51,6 +51,9 @@ var argslice []string
 
 //go:linkname syscall_runtime_envs syscall.runtime_envs
 func syscall_runtime_envs() []string { return append([]string{}, envs...) }
+
+//go:linkname syscall_Getpagesize syscall.Getpagesize
+func syscall_Getpagesize() int { return int(physPageSize) }
 
 //go:linkname os_runtime_args os.runtime_args
 func os_runtime_args() []string { return append([]string{}, argslice...) }

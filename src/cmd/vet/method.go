@@ -26,10 +26,10 @@ type MethodSig struct {
 }
 
 // canonicalMethods lists the input and output types for Go methods
-// that are checked using dynamic interface checks.  Because the
+// that are checked using dynamic interface checks. Because the
 // checks are dynamic, such methods would not cause a compile error
 // if they have the wrong signature: instead the dynamic check would
-// fail, sometimes mysteriously.  If a method is found with a name listed
+// fail, sometimes mysteriously. If a method is found with a name listed
 // here but not the input/output types listed here, vet complains.
 //
 // A few of the canonical methods have very common names.
@@ -39,7 +39,7 @@ type MethodSig struct {
 // To do that, the arguments that have a = prefix are treated as
 // signals that the canonical meaning is intended: if a Scan
 // method doesn't have a fmt.ScanState as its first argument,
-// we let it go.  But if it does have a fmt.ScanState, then the
+// we let it go. But if it does have a fmt.ScanState, then the
 // rest has to match.
 var canonicalMethods = map[string]MethodSig{
 	// "Flush": {{}, {"error"}}, // http.Flusher and jpeg.writer conflict
@@ -48,7 +48,6 @@ var canonicalMethods = map[string]MethodSig{
 	"GobEncode":     {[]string{}, []string{"[]byte", "error"}},                         // gob.GobEncoder
 	"MarshalJSON":   {[]string{}, []string{"[]byte", "error"}},                         // json.Marshaler
 	"MarshalXML":    {[]string{"*xml.Encoder", "xml.StartElement"}, []string{"error"}}, // xml.Marshaler
-	"Peek":          {[]string{"=int"}, []string{"[]byte", "error"}},                   // image.reader (matching bufio.Reader)
 	"ReadByte":      {[]string{}, []string{"byte", "error"}},                           // io.ByteReader
 	"ReadFrom":      {[]string{"=io.Reader"}, []string{"int64", "error"}},              // io.ReaderFrom
 	"ReadRune":      {[]string{}, []string{"rune", "int", "error"}},                    // io.RuneReader
@@ -139,7 +138,7 @@ func typeFlatten(l []*ast.Field) []ast.Expr {
 			t = append(t, f.Type)
 			continue
 		}
-		for _ = range f.Names {
+		for range f.Names {
 			t = append(t, f.Type)
 		}
 	}

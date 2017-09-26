@@ -13,7 +13,7 @@ func gogetenv(key string) string {
 	if env == nil {
 		throw("getenv before env init")
 	}
-	for _, s := range environ() {
+	for _, s := range env {
 		if len(s) > len(key) && s[len(key)] == '=' && s[:len(key)] == key {
 			return s[len(key)+1:]
 		}
@@ -32,7 +32,7 @@ func syscall_setenv_c(k string, v string) {
 		return
 	}
 	arg := [2]unsafe.Pointer{cstring(k), cstring(v)}
-	asmcgocall(unsafe.Pointer(_cgo_setenv), unsafe.Pointer(&arg))
+	asmcgocall(_cgo_setenv, unsafe.Pointer(&arg))
 }
 
 // Update the C environment if cgo is loaded.
@@ -43,7 +43,7 @@ func syscall_unsetenv_c(k string) {
 		return
 	}
 	arg := [1]unsafe.Pointer{cstring(k)}
-	asmcgocall(unsafe.Pointer(_cgo_unsetenv), unsafe.Pointer(&arg))
+	asmcgocall(_cgo_unsetenv, unsafe.Pointer(&arg))
 }
 
 func cstring(s string) unsafe.Pointer {

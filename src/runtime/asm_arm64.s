@@ -11,9 +11,6 @@
 TEXT runtime·rt0_go(SB),NOSPLIT,$0
 	// SP = stack; R0 = argc; R1 = argv
 
-	// initialize essential registers
-	BL	runtime·reginit(SB)
-
 	SUB	$32, RSP
 	MOVW	R0, 8(RSP) // argc
 	MOVD	R1, 16(RSP) // argv
@@ -100,15 +97,6 @@ TEXT runtime·breakpoint(SB),NOSPLIT,$-8-0
 TEXT runtime·asminit(SB),NOSPLIT,$-8-0
 	RET
 
-TEXT runtime·reginit(SB),NOSPLIT,$-8-0
-	// initialize essential FP registers
-	FMOVD	$4503601774854144.0, F27
-	FMOVD	$0.5, F29
-	FSUBD	F29, F29, F28
-	FADDD	F29, F29, F30
-	FADDD	F30, F30, F31
-	RET
-
 /*
  *  go-routine
  */
@@ -123,13 +111,29 @@ TEXT runtime·gosave(SB), NOSPLIT, $-8-8
 	MOVD	g, gobuf_g(R3)
 	MOVD	ZR, gobuf_lr(R3)
 	MOVD	ZR, gobuf_ret(R3)
-	MOVD	ZR, gobuf_ctxt(R3)
+	// Assert ctxt is zero. See func save.
+	MOVD	gobuf_ctxt(R3), R0
+	CMP	$0, R0
+	BEQ	2(PC)
+	CALL	runtime·badctxt(SB)
 	RET
 
 // void gogo(Gobuf*)
 // restore state from Gobuf; longjmp
-TEXT runtime·gogo(SB), NOSPLIT, $-8-8
+TEXT runtime·gogo(SB), NOSPLIT, $24-8
 	MOVD	buf+0(FP), R5
+
+	// If ctxt is not nil, invoke deletion barrier before overwriting.
+	MOVD	gobuf_ctxt(R5), R0
+	CMP	$0, R0
+	BEQ	nilctxt
+	MOVD	$gobuf_ctxt(R5), R0
+	MOVD	R0, 8(RSP)
+	MOVD	ZR, 16(RSP)
+	BL	runtime·writebarrierptr_prewrite(SB)
+	MOVD	buf+0(FP), R5
+
+nilctxt:
 	MOVD	gobuf_g(R5), g
 	BL	runtime·save_g(SB)
 
@@ -149,7 +153,7 @@ TEXT runtime·gogo(SB), NOSPLIT, $-8-8
 
 // void mcall(fn func(*g))
 // Switch to m->g0's stack, call fn(g).
-// Fn must never return.  It should gogo(&g->sched)
+// Fn must never return. It should gogo(&g->sched)
 // to keep running g.
 TEXT runtime·mcall(SB), NOSPLIT, $-8-8
 	// Save caller state in g->sched
@@ -178,7 +182,7 @@ TEXT runtime·mcall(SB), NOSPLIT, $-8-8
 	B	runtime·badmcall2(SB)
 
 // systemstack_switch is a dummy routine that systemstack leaves at the bottom
-// of the G stack.  We need to distinguish the routine that
+// of the G stack. We need to distinguish the routine that
 // lives at the bottom of the G stack from the one that lives
 // at the top of the system stack because the one at the top of
 // the system stack terminates the stack walk (see topofstack()).
@@ -211,7 +215,7 @@ TEXT runtime·systemstack(SB), NOSPLIT, $0-8
 	BL	(R3)
 
 switch:
-	// save our state in g->sched.  Pretend to
+	// save our state in g->sched. Pretend to
 	// be systemstack_switch if the G stack is scanned.
 	MOVD	$runtime·systemstack_switch(SB), R6
 	ADD	$8, R6	// get past prologue
@@ -268,22 +272,24 @@ TEXT runtime·morestack(SB),NOSPLIT,$-8-0
 	MOVD	g_m(g), R8
 	MOVD	m_g0(R8), R4
 	CMP	g, R4
-	BNE	2(PC)
+	BNE	3(PC)
+	BL	runtime·badmorestackg0(SB)
 	B	runtime·abort(SB)
 
 	// Cannot grow signal stack (m->gsignal).
 	MOVD	m_gsignal(R8), R4
 	CMP	g, R4
-	BNE	2(PC)
+	BNE	3(PC)
+	BL	runtime·badmorestackgsignal(SB)
 	B	runtime·abort(SB)
 
 	// Called from f.
 	// Set g->sched to context in f
-	MOVD	R26, (g_sched+gobuf_ctxt)(g)
 	MOVD	RSP, R0
 	MOVD	R0, (g_sched+gobuf_sp)(g)
 	MOVD	LR, (g_sched+gobuf_pc)(g)
 	MOVD	R3, (g_sched+gobuf_lr)(g)
+	// newstack will fill gobuf.ctxt.
 
 	// Called from f.
 	// Set m->morebuf to f's callers.
@@ -297,6 +303,8 @@ TEXT runtime·morestack(SB),NOSPLIT,$-8-0
 	BL	runtime·save_g(SB)
 	MOVD	(g_sched+gobuf_sp)(g), R0
 	MOVD	R0, RSP
+	MOVD.W	$0, -16(RSP)	// create a call frame on g0
+	MOVD	R26, 8(RSP)	// ctxt argument
 	BL	runtime·newstack(SB)
 
 	// Not reached, but make sure the return PC from the call to newstack
@@ -306,23 +314,6 @@ TEXT runtime·morestack(SB),NOSPLIT,$-8-0
 TEXT runtime·morestack_noctxt(SB),NOSPLIT,$-4-0
 	MOVW	$0, R26
 	B runtime·morestack(SB)
-
-TEXT runtime·stackBarrier(SB),NOSPLIT,$0
-	// We came here via a RET to an overwritten LR.
-	// R0 may be live (see return0). Other registers are available.
-
-	// Get the original return PC, g.stkbar[g.stkbarPos].savedLRVal.
-	MOVD	(g_stkbar+slice_array)(g), R4
-	MOVD	g_stkbarPos(g), R5
-	MOVD	$stkbar__size, R6
-	MUL	R5, R6
-	ADD	R4, R6
-	MOVD	stkbar_savedLRVal(R6), R6
-	// Record that this stack barrier was hit.
-	ADD	$1, R5
-	MOVD	R5, g_stkbarPos(g)
-	// Jump to the original return PC.
-	B	(R6)
 
 // reflectcall: call a function with the given argument list
 // func call(argtype *_type, f *FuncVal, arg *byte, argsize, retoffset uint32).
@@ -343,8 +334,6 @@ TEXT reflect·call(SB), NOSPLIT, $0-0
 
 TEXT ·reflectcall(SB), NOSPLIT, $-8-32
 	MOVWU argsize+24(FP), R16
-	// NOTE(rsc): No call16, because CALLFN needs four words
-	// of argument space to invoke callwritebarrier.
 	DISPATCH(runtime·call32, 32)
 	DISPATCH(runtime·call64, 64)
 	DISPATCH(runtime·call128, 128)
@@ -395,33 +384,27 @@ TEXT NAME(SB), WRAPPER, $MAXSIZE-24;		\
 	PCDATA  $PCDATA_StackMapIndex, $0;	\
 	BL	(R0);				\
 	/* copy return values back */		\
-	MOVD	arg+16(FP), R3;			\
-	MOVWU	n+24(FP), R4;			\
-	MOVWU	retoffset+28(FP), R6;		\
-	MOVD	RSP, R5;				\
-	ADD	R6, R5; 			\
-	ADD	R6, R3;				\
-	SUB	R6, R4;				\
-	ADD	$(8-1), R5;			\
-	SUB	$1, R3;				\
-	ADD	R5, R4;				\
-loop:						\
-	CMP	R5, R4;				\
-	BEQ	end;				\
-	MOVBU.W	1(R5), R6;			\
-	MOVBU.W	R6, 1(R3);			\
-	B	loop;				\
-end:						\
-	/* execute write barrier updates */	\
 	MOVD	argtype+0(FP), R7;		\
 	MOVD	arg+16(FP), R3;			\
 	MOVWU	n+24(FP), R4;			\
 	MOVWU	retoffset+28(FP), R6;		\
-	MOVD	R7, 8(RSP);			\
-	MOVD	R3, 16(RSP);			\
-	MOVD	R4, 24(RSP);			\
-	MOVD	R6, 32(RSP);			\
-	BL	runtime·callwritebarrier(SB);	\
+	ADD	$8, RSP, R5;			\
+	ADD	R6, R5; 			\
+	ADD	R6, R3;				\
+	SUB	R6, R4;				\
+	BL	callRet<>(SB);			\
+	RET
+
+// callRet copies return values back at the end of call*. This is a
+// separate function so it can allocate stack space for the arguments
+// to reflectcallmove. It does not follow the Go ABI; it expects its
+// arguments in registers.
+TEXT callRet<>(SB), NOSPLIT, $40-0
+	MOVD	R7, 8(RSP)
+	MOVD	R3, 16(RSP)
+	MOVD	R5, 24(RSP)
+	MOVD	R4, 32(RSP)
+	BL	runtime·reflectcallmove(SB)
 	RET
 
 // These have 8 added to make the overall frame size a multiple of 16,
@@ -499,7 +482,11 @@ TEXT gosave<>(SB),NOSPLIT,$-8
 	MOVD	R0, (g_sched+gobuf_sp)(g)
 	MOVD	$0, (g_sched+gobuf_lr)(g)
 	MOVD	$0, (g_sched+gobuf_ret)(g)
-	MOVD	$0, (g_sched+gobuf_ctxt)(g)
+	// Assert ctxt is zero. See func save.
+	MOVD	(g_sched+gobuf_ctxt)(g), R0
+	CMP	$0, R0
+	BEQ	2(PC)
+	CALL	runtime·badctxt(SB)
 	RET
 
 // func asmcgocall(fn, arg unsafe.Pointer) int32
@@ -542,7 +529,7 @@ g0:
 	BL	(R1)
 	MOVD	R0, R9
 
-	// Restore g, stack pointer.  R0 is errno, so don't touch it
+	// Restore g, stack pointer. R0 is errno, so don't touch it
 	MOVD	0(RSP), g
 	BL	runtime·save_g(SB)
 	MOVD	(g_stack+stack_hi)(g), R5
@@ -554,23 +541,25 @@ g0:
 	MOVW	R0, ret+16(FP)
 	RET
 
-// cgocallback(void (*fn)(void*), void *frame, uintptr framesize)
+// cgocallback(void (*fn)(void*), void *frame, uintptr framesize, uintptr ctxt)
 // Turn the fn into a Go func (by taking its address) and call
 // cgocallback_gofunc.
-TEXT runtime·cgocallback(SB),NOSPLIT,$24-24
+TEXT runtime·cgocallback(SB),NOSPLIT,$40-32
 	MOVD	$fn+0(FP), R0
 	MOVD	R0, 8(RSP)
 	MOVD	frame+8(FP), R0
 	MOVD	R0, 16(RSP)
 	MOVD	framesize+16(FP), R0
 	MOVD	R0, 24(RSP)
+	MOVD	ctxt+24(FP), R0
+	MOVD	R0, 32(RSP)
 	MOVD	$runtime·cgocallback_gofunc(SB), R0
 	BL	(R0)
 	RET
 
-// cgocallback_gofunc(FuncVal*, void *frame, uintptr framesize)
+// cgocallback_gofunc(FuncVal*, void *frame, uintptr framesize, uintptr ctxt)
 // See cgocall.go for more details.
-TEXT ·cgocallback_gofunc(SB),NOSPLIT,$24-24
+TEXT ·cgocallback_gofunc(SB),NOSPLIT,$24-32
 	NO_LOCAL_POINTERS
 
 	// Load g from thread-local storage.
@@ -586,7 +575,13 @@ nocgo:
 	// lots of space, but the linker doesn't know. Hide the call from
 	// the linker analysis by using an indirect call.
 	CMP	$0, g
-	BNE	havem
+	BEQ	needm
+
+	MOVD	g_m(g), R8
+	MOVD	R8, savedm-8(SP)
+	B	havem
+
+needm:
 	MOVD	g, savedm-8(SP) // g is zero, so is m.
 	MOVD	$runtime·needm(SB), R0
 	BL	(R0)
@@ -608,8 +603,6 @@ nocgo:
 	MOVD	R0, (g_sched+gobuf_sp)(R3)
 
 havem:
-	MOVD	g_m(g), R8
-	MOVD	R8, savedm-8(SP)
 	// Now there's a valid m, and we're running on its m->g0.
 	// Save current m->g0->sched.sp on stack and then set it to SP.
 	// Save current sp in m->g0->sched.sp in preparation for
@@ -636,13 +629,16 @@ havem:
 	// so that the traceback will seamlessly trace back into
 	// the earlier calls.
 	//
-	// In the new goroutine, -16(SP) and -8(SP) are unused.
+	// In the new goroutine, -8(SP) is unused (where SP refers to
+	// m->curg's SP while we're setting it up, before we've adjusted it).
 	MOVD	m_curg(R8), g
 	BL	runtime·save_g(SB)
 	MOVD	(g_sched+gobuf_sp)(g), R4 // prepare stack as R4
 	MOVD	(g_sched+gobuf_pc)(g), R5
-	MOVD	R5, -(24+8)(R4)	// maintain 16-byte SP alignment
-	MOVD	$-(24+8)(R4), R0
+	MOVD	R5, -(24+8)(R4)
+	MOVD	ctxt+24(FP), R0
+	MOVD	R0, -(16+8)(R4)
+	MOVD	$-(24+8)(R4), R0 // maintain 16-byte SP alignment
 	MOVD	R0, RSP
 	BL	runtime·cgocallbackg(SB)
 
@@ -708,66 +704,25 @@ TEXT setg_gcc<>(SB),NOSPLIT,$8
 	MOVD	savedR27-8(SP), R27
 	RET
 
-TEXT runtime·getcallerpc(SB),NOSPLIT,$8-16
-	MOVD	16(RSP), R0		// LR saved by caller
-	MOVD	runtime·stackBarrierPC(SB), R1
-	CMP	R0, R1
-	BNE	nobar
-	// Get original return PC.
-	BL	runtime·nextBarrierPC(SB)
-	MOVD	8(RSP), R0
-nobar:
-	MOVD	R0, ret+8(FP)
-	RET
-
-TEXT runtime·setcallerpc(SB),NOSPLIT,$8-16
-	MOVD	pc+8(FP), R0
-	MOVD	16(RSP), R1
-	MOVD	runtime·stackBarrierPC(SB), R2
-	CMP	R1, R2
-	BEQ	setbar
-	MOVD	R0, 16(RSP)		// set LR in caller
-	RET
-setbar:
-	// Set the stack barrier return PC.
-	MOVD	R0, 8(RSP)
-	BL	runtime·setNextBarrierPC(SB)
-	RET
-
-TEXT runtime·getcallersp(SB),NOSPLIT,$0-16
-	MOVD	argp+0(FP), R0
-	SUB	$8, R0
-	MOVD	R0, ret+8(FP)
+TEXT runtime·getcallerpc(SB),NOSPLIT,$-8-8
+	MOVD	0(RSP), R0		// LR saved by caller
+	MOVD	R0, ret+0(FP)
 	RET
 
 TEXT runtime·abort(SB),NOSPLIT,$-8-0
 	B	(ZR)
 	UNDEF
 
-// memhash_varlen(p unsafe.Pointer, h seed) uintptr
-// redirects to memhash(p, h, size) using the size
-// stored in the closure.
-TEXT runtime·memhash_varlen(SB),NOSPLIT,$40-24
-	GO_ARGS
-	NO_LOCAL_POINTERS
-	MOVD	p+0(FP), R3
-	MOVD	h+8(FP), R4
-	MOVD	8(R26), R5
-	MOVD	R3, 8(RSP)
-	MOVD	R4, 16(RSP)
-	MOVD	R5, 24(RSP)
-	BL	runtime·memhash(SB)
-	MOVD	32(RSP), R3
-	MOVD	R3, ret+16(FP)
-	RET
-
-TEXT runtime·memeq(SB),NOSPLIT,$-8-25
+// memequal(p, q unsafe.Pointer, size uintptr) bool
+TEXT runtime·memequal(SB),NOSPLIT,$-8-25
 	MOVD	a+0(FP), R1
 	MOVD	b+8(FP), R2
 	MOVD	size+16(FP), R3
 	ADD	R1, R3, R6
 	MOVD	$1, R0
 	MOVB	R0, ret+24(FP)
+	CMP	R1, R2
+	BEQ	done
 loop:
 	CMP	R1, R6
 	BEQ	done
@@ -790,7 +745,7 @@ TEXT runtime·memequal_varlen(SB),NOSPLIT,$40-17
 	MOVD	R3, 8(RSP)
 	MOVD	R4, 16(RSP)
 	MOVD	R5, 24(RSP)
-	BL	runtime·memeq(SB)
+	BL	runtime·memequal(SB)
 	MOVBU	32(RSP), R3
 	MOVB	R3, ret+16(FP)
 	RET
@@ -851,31 +806,6 @@ samebytes:
 	MOVD	R4, (R7)
 	RET
 
-// eqstring tests whether two strings are equal.
-// The compiler guarantees that strings passed
-// to eqstring have equal length.
-// See runtime_test.go:eqstring_generic for
-// equivalent Go code.
-TEXT runtime·eqstring(SB),NOSPLIT,$0-33
-	MOVD	s1str+0(FP), R0
-	MOVD	s1len+8(FP), R1
-	MOVD	s2str+16(FP), R2
-	ADD	R0, R1		// end
-loop:
-	CMP	R0, R1
-	BEQ	equal		// reaches the end
-	MOVBU.P	1(R0), R4
-	MOVBU.P	1(R2), R5
-	CMP	R4, R5
-	BEQ	loop
-notequal:
-	MOVB	ZR, ret+32(FP)
-	RET
-equal:
-	MOVD	$1, R0
-	MOVB	R0, ret+32(FP)
-	RET
-
 //
 // functions for other packages
 //
@@ -925,7 +855,7 @@ notfound:
 	MOVD	R0, ret+24(FP)
 	RET
 
-// TODO: share code with memeq?
+// TODO: share code with memequal?
 TEXT bytes·Equal(SB),NOSPLIT,$0-49
 	MOVD	a_len+8(FP), R1
 	MOVD	b_len+32(FP), R3
@@ -949,18 +879,6 @@ equal:
 	MOVB	R0, ret+48(FP)
 	RET
 
-TEXT runtime·fastrand1(SB),NOSPLIT,$-8-4
-	MOVD	g_m(g), R1
-	MOVWU	m_fastrand(R1), R0
-	ADD	R0, R0
-	CMPW	$0, R0
-	BGE	notneg
-	EOR	$0x88888eef, R0
-notneg:
-	MOVW	R0, m_fastrand(R1)
-	MOVW	R0, ret+0(FP)
-	RET
-
 TEXT runtime·return0(SB), NOSPLIT, $0
 	MOVW	$0, R0
 	RET
@@ -971,21 +889,8 @@ TEXT runtime·goexit(SB),NOSPLIT,$-8-0
 	MOVD	R0, R0	// NOP
 	BL	runtime·goexit1(SB)	// does not return
 
-// TODO(aram): use PRFM here.
-TEXT runtime·prefetcht0(SB),NOSPLIT,$0-8
+TEXT runtime·sigreturn(SB),NOSPLIT,$0-0
 	RET
-
-TEXT runtime·prefetcht1(SB),NOSPLIT,$0-8
-	RET
-
-TEXT runtime·prefetcht2(SB),NOSPLIT,$0-8
-	RET
-
-TEXT runtime·prefetchnta(SB),NOSPLIT,$0-8
-	RET
-
-TEXT runtime·sigreturn(SB),NOSPLIT,$0-8
-        RET
 
 // This is called from .init_array and follows the platform, not Go, ABI.
 TEXT runtime·addmoduledata(SB),NOSPLIT,$0-0

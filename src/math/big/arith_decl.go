@@ -1,4 +1,4 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -18,4 +18,3 @@ func shrVU(z, x []Word, s uint) (c Word)
 func mulAddVWW(z, x []Word, y, r Word) (c Word)
 func addMulVVW(z, x []Word, y Word) (c Word)
 func divWVW(z []Word, xn Word, x []Word, y Word) (r Word)
-func bitLen(x Word) (n int)

@@ -327,7 +327,7 @@ func (p *parser) next() {
 			// The comment is on same line as the previous token; it
 			// cannot be a lead comment but may be a line comment.
 			comment, endline = p.consumeCommentGroup(0)
-			if p.file.Line(p.pos) != endline {
+			if p.file.Line(p.pos) != endline || p.tok == token.EOF {
 				// The next token is on a different line, thus
 				// the last comment group is a line comment.
 				p.lineComment = comment
@@ -1597,23 +1597,19 @@ func (p *parser) parseBinaryExpr(lhs bool, prec1 int) ast.Expr {
 	}
 
 	x := p.parseUnaryExpr(lhs)
-	for _, prec := p.tokPrec(); prec >= prec1; prec-- {
-		for {
-			op, oprec := p.tokPrec()
-			if oprec != prec {
-				break
-			}
-			pos := p.expect(op)
-			if lhs {
-				p.resolve(x)
-				lhs = false
-			}
-			y := p.parseBinaryExpr(false, prec+1)
-			x = &ast.BinaryExpr{X: p.checkExpr(x), OpPos: pos, Op: op, Y: p.checkExpr(y)}
+	for {
+		op, oprec := p.tokPrec()
+		if oprec < prec1 {
+			return x
 		}
+		pos := p.expect(op)
+		if lhs {
+			p.resolve(x)
+			lhs = false
+		}
+		y := p.parseBinaryExpr(false, oprec+1)
+		x = &ast.BinaryExpr{X: p.checkExpr(x), OpPos: pos, Op: op, Y: p.checkExpr(y)}
 	}
-
-	return x
 }
 
 // If lhs is set and the result is an identifier, it is not resolved.
@@ -1711,8 +1707,8 @@ func (p *parser) parseSimpleStmt(mode int) (ast.Stmt, bool) {
 		}
 		// The label declaration typically starts at x[0].Pos(), but the label
 		// declaration may be erroneous due to a token after that position (and
-		// before the ':'). If SpuriousErrors is not set, the (only) error re-
-		// ported for the line is the illegal label error instead of the token
+		// before the ':'). If SpuriousErrors is not set, the (only) error
+		// reported for the line is the illegal label error instead of the token
 		// before the ':' that caused the problem. Thus, use the (latest) colon
 		// position for error reporting.
 		p.error(colon, "illegal label declaration")
@@ -2331,7 +2327,10 @@ func (p *parser) parseTypeSpec(doc *ast.CommentGroup, _ token.Token, _ int) ast.
 	// (Global identifiers are resolved in a separate phase after parsing.)
 	spec := &ast.TypeSpec{Doc: doc, Name: ident}
 	p.declare(spec, nil, p.topScope, ast.Typ, ident)
-
+	if p.tok == token.ASSIGN {
+		spec.Assign = p.pos
+		p.next()
+	}
 	spec.Type = p.parseType()
 	p.expectSemi() // call before accessing p.linecomment
 	spec.Comment = p.lineComment

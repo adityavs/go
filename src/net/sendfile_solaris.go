@@ -1,22 +1,14 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 package net
 
 import (
+	"internal/poll"
 	"io"
 	"os"
-	"syscall"
 )
-
-// Not strictly needed, but very helpful for debugging, see issue #10221.
-//go:cgo_import_dynamic _ _ "libsendfile.so"
-//go:cgo_import_dynamic _ _ "libsocket.so"
-
-// maxSendfileSize is the largest chunk size we ask the kernel to copy
-// at a time.
-const maxSendfileSize int = 4 << 20
 
 // sendFile copies the contents of r to c using the sendfile
 // system call to minimize copies.
@@ -57,54 +49,15 @@ func sendFile(c *netFD, r io.Reader) (written int64, err error, handled bool) {
 	// use the current position of the file -- if you pass it offset 0, it starts
 	// from offset 0. There's no way to tell it "start from current position", so
 	// we have to manage that explicitly.
-	pos, err := f.Seek(0, os.SEEK_CUR)
+	pos, err := f.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return 0, err, false
 	}
 
-	if err := c.writeLock(); err != nil {
-		return 0, err, true
-	}
-	defer c.writeUnlock()
+	written, err = poll.SendFile(&c.pfd, int(f.Fd()), pos, remain)
 
-	dst := c.sysfd
-	src := int(f.Fd())
-	for remain > 0 {
-		n := maxSendfileSize
-		if int64(n) > remain {
-			n = int(remain)
-		}
-		pos1 := pos
-		n, err1 := syscall.Sendfile(dst, src, &pos1, n)
-		if n > 0 {
-			pos += int64(n)
-			written += int64(n)
-			remain -= int64(n)
-		}
-		if n == 0 && err1 == nil {
-			break
-		}
-		if err1 == syscall.EAGAIN {
-			if err1 = c.pd.WaitWrite(); err1 == nil {
-				continue
-			}
-		}
-		if err1 == syscall.EINTR {
-			continue
-		}
-		if err1 != nil {
-			// This includes syscall.ENOSYS (no kernel
-			// support) and syscall.EINVAL (fd types which
-			// don't implement sendfile)
-			err = err1
-			break
-		}
-	}
 	if lr != nil {
-		lr.N = remain
+		lr.N = remain - written
 	}
-	if err != nil {
-		err = os.NewSyscallError("sendfile", err)
-	}
-	return written, err, written > 0
+	return written, wrapSyscallError("sendfile", err), written > 0
 }

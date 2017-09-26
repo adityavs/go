@@ -52,6 +52,9 @@ Flags:
 		The dynamic header is on by default, even without any
 		references to dynamic libraries, because many common
 		system tools now assume the presence of the header.
+	-extar ar
+		Set the external archive program (default "ar").
+		Used only for -buildmode=c-archive.
 	-extld linker
 		Set the external linker (default "clang" or "gcc").
 	-extldflags flags
@@ -82,6 +85,8 @@ Flags:
 		Link with C/C++ memory sanitizer support.
 	-o file
 		Write output to file (default a.out, or a.out.exe on Windows).
+	-pluginpath path
+		The path name used to prefix exported plugin symbols.
 	-r dir1:dir2:...
 		Set the ELF dynamic linker search path.
 	-race

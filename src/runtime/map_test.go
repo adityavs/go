@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -235,6 +236,7 @@ func TestIterGrowWithGC(t *testing.T) {
 }
 
 func testConcurrentReadsAfterGrowth(t *testing.T, useReflect bool) {
+	t.Parallel()
 	if runtime.GOMAXPROCS(-1) == 1 {
 		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(16))
 	}
@@ -314,6 +316,22 @@ func TestBigItems(t *testing.T) {
 		if values[i] != fmt.Sprintf("string%02d", i) {
 			t.Errorf("#%d: missing value: %v", i, values[i])
 		}
+	}
+}
+
+func TestMapHugeZero(t *testing.T) {
+	type T [4000]byte
+	m := map[int]T{}
+	x := m[0]
+	if x != (T{}) {
+		t.Errorf("map value not zero")
+	}
+	y, ok := m[0]
+	if ok {
+		t.Errorf("map value should be missing")
+	}
+	if y != (T{}) {
+		t.Errorf("map value not zero")
 	}
 }
 
@@ -570,6 +588,43 @@ func TestMapLargeValNoPointer(t *testing.T) {
 	}
 }
 
+// Test that making a map with a large or invalid hint
+// doesn't panic. (Issue 19926).
+func TestIgnoreBogusMapHint(t *testing.T) {
+	for _, hint := range []int64{-1, 1 << 62} {
+		_ = make(map[int]int, hint)
+	}
+}
+
+func TestMapBuckets(t *testing.T) {
+	// Test that maps of different sizes have the right number of buckets.
+	// These tests depend on bucketCnt and loadFactor* in hashmap.go.
+	for _, tt := range [...]struct {
+		n, b int
+	}{
+		{8, 1},
+		{9, 2},
+		{13, 2},
+		{14, 4},
+		{26, 4},
+	} {
+		m := map[int]int{}
+		for i := 0; i < tt.n; i++ {
+			m[i] = i
+		}
+		if got := runtime.MapBuckets(m); got != tt.b {
+			t.Errorf("no hint n=%d want %d buckets, got %d", tt.n, tt.b, got)
+		}
+		m = make(map[int]int, tt.n)
+		for i := 0; i < tt.n; i++ {
+			m[i] = i
+		}
+		if got := runtime.MapBuckets(m); got != tt.b {
+			t.Errorf("hint n=%d want %d buckets, got %d", tt.n, tt.b, got)
+		}
+	}
+}
+
 func benchmarkMapPop(b *testing.B, n int) {
 	m := map[int]int{}
 	for i := 0; i < b.N; i++ {
@@ -591,12 +646,119 @@ func BenchmarkMapPop100(b *testing.B)   { benchmarkMapPop(b, 100) }
 func BenchmarkMapPop1000(b *testing.B)  { benchmarkMapPop(b, 1000) }
 func BenchmarkMapPop10000(b *testing.B) { benchmarkMapPop(b, 10000) }
 
+var testNonEscapingMapVariable int = 8
+
 func TestNonEscapingMap(t *testing.T) {
 	n := testing.AllocsPerRun(1000, func() {
+		m := map[int]int{}
+		m[0] = 0
+	})
+	if n != 0 {
+		t.Fatalf("mapliteral: want 0 allocs, got %v", n)
+	}
+	n = testing.AllocsPerRun(1000, func() {
 		m := make(map[int]int)
 		m[0] = 0
 	})
 	if n != 0 {
-		t.Fatalf("want 0 allocs, got %v", n)
+		t.Fatalf("no hint: want 0 allocs, got %v", n)
 	}
+	n = testing.AllocsPerRun(1000, func() {
+		m := make(map[int]int, 8)
+		m[0] = 0
+	})
+	if n != 0 {
+		t.Fatalf("with small hint: want 0 allocs, got %v", n)
+	}
+	n = testing.AllocsPerRun(1000, func() {
+		m := make(map[int]int, testNonEscapingMapVariable)
+		m[0] = 0
+	})
+	if n != 0 {
+		t.Fatalf("with variable hint: want 0 allocs, got %v", n)
+	}
+
+}
+
+func benchmarkMapAssignInt32(b *testing.B, n int) {
+	a := make(map[int32]int)
+	for i := 0; i < b.N; i++ {
+		a[int32(i&(n-1))] = i
+	}
+}
+
+func benchmarkMapDeleteInt32(b *testing.B, n int) {
+	a := make(map[int32]int, n*b.N)
+	for i := 0; i < n*b.N; i++ {
+		a[int32(i)] = i
+	}
+	b.ResetTimer()
+	for i := 0; i < n*b.N; i = i + n {
+		delete(a, int32(i))
+	}
+}
+
+func benchmarkMapAssignInt64(b *testing.B, n int) {
+	a := make(map[int64]int)
+	for i := 0; i < b.N; i++ {
+		a[int64(i&(n-1))] = i
+	}
+}
+
+func benchmarkMapDeleteInt64(b *testing.B, n int) {
+	a := make(map[int64]int, n*b.N)
+	for i := 0; i < n*b.N; i++ {
+		a[int64(i)] = i
+	}
+	b.ResetTimer()
+	for i := 0; i < n*b.N; i = i + n {
+		delete(a, int64(i))
+	}
+}
+
+func benchmarkMapAssignStr(b *testing.B, n int) {
+	k := make([]string, n)
+	for i := 0; i < len(k); i++ {
+		k[i] = strconv.Itoa(i)
+	}
+	b.ResetTimer()
+	a := make(map[string]int)
+	for i := 0; i < b.N; i++ {
+		a[k[i&(n-1)]] = i
+	}
+}
+
+func benchmarkMapDeleteStr(b *testing.B, n int) {
+	k := make([]string, n*b.N)
+	for i := 0; i < n*b.N; i++ {
+		k[i] = strconv.Itoa(i)
+	}
+	a := make(map[string]int, n*b.N)
+	for i := 0; i < n*b.N; i++ {
+		a[k[i]] = i
+	}
+	b.ResetTimer()
+	for i := 0; i < n*b.N; i = i + n {
+		delete(a, k[i])
+	}
+}
+
+func runWith(f func(*testing.B, int), v ...int) func(*testing.B) {
+	return func(b *testing.B) {
+		for _, n := range v {
+			b.Run(strconv.Itoa(n), func(b *testing.B) { f(b, n) })
+		}
+	}
+}
+
+func BenchmarkMapAssign(b *testing.B) {
+	b.Run("Int32", runWith(benchmarkMapAssignInt32, 1<<8, 1<<16))
+	b.Run("Int64", runWith(benchmarkMapAssignInt64, 1<<8, 1<<16))
+	b.Run("Str", runWith(benchmarkMapAssignStr, 1<<8, 1<<16))
+}
+
+func BenchmarkMapDelete(b *testing.B) {
+	b.Run("Int32", runWith(benchmarkMapDeleteInt32, 1, 2, 4))
+	b.Run("Int64", runWith(benchmarkMapDeleteInt64, 1, 2, 4))
+	b.Run("Str", runWith(benchmarkMapDeleteStr, 1, 2, 4))
 }

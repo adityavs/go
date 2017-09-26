@@ -34,6 +34,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -44,10 +45,17 @@ var errRetry = errors.New("failed to start test harness (retry attempted)")
 var tmpdir string
 
 var (
-	devID  string
-	appID  string
-	teamID string
+	devID    string
+	appID    string
+	teamID   string
+	bundleID string
+	deviceID string
 )
+
+// lock is a file lock to serialize iOS runs. It is global to avoid the
+// garbage collector finalizing it, closing the file and releasing the
+// lock prematurely.
+var lock *os.File
 
 func main() {
 	log.SetFlags(0)
@@ -70,12 +78,36 @@ func main() {
 	// https://developer.apple.com/membercenter/index.action#accountSummary as Team ID.
 	teamID = getenv("GOIOS_TEAM_ID")
 
+	// Device IDs as listed with ios-deploy -c.
+	deviceID = os.Getenv("GOIOS_DEVICE_ID")
+
+	parts := strings.SplitN(appID, ".", 2)
+	// For compatibility with the old builders, use a fallback bundle ID
+	bundleID = "golang.gotest"
+	if len(parts) == 2 {
+		bundleID = parts[1]
+	}
+
 	var err error
 	tmpdir, err = ioutil.TempDir("", "go_darwin_arm_exec_")
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	// This wrapper uses complicated machinery to run iOS binaries. It
+	// works, but only when running one binary at a time.
+	// Use a file lock to make sure only one wrapper is running at a time.
+	//
+	// The lock file is never deleted, to avoid concurrent locks on distinct
+	// files with the same path.
+	lockName := filepath.Join(os.TempDir(), "go_darwin_arm_exec-"+deviceID+".lock")
+	lock, err = os.OpenFile(lockName, os.O_CREATE|os.O_RDONLY, 0666)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		log.Fatal(err)
+	}
 	// Approximately 1 in a 100 binaries fail to start. If it happens,
 	// try again. These failures happen for several reasons beyond
 	// our control, but all of them are safe to retry as they happen
@@ -119,19 +151,19 @@ func run(bin string, args []string) (err error) {
 		return err
 	}
 
+	pkgpath, err := copyLocalData(appdir)
+	if err != nil {
+		return err
+	}
+
 	entitlementsPath := filepath.Join(tmpdir, "Entitlements.plist")
 	if err := ioutil.WriteFile(entitlementsPath, []byte(entitlementsPlist()), 0744); err != nil {
 		return err
 	}
-	if err := ioutil.WriteFile(filepath.Join(appdir, "Info.plist"), []byte(infoPlist), 0744); err != nil {
+	if err := ioutil.WriteFile(filepath.Join(appdir, "Info.plist"), []byte(infoPlist(pkgpath)), 0744); err != nil {
 		return err
 	}
 	if err := ioutil.WriteFile(filepath.Join(appdir, "ResourceRules.plist"), []byte(resourceRules), 0744); err != nil {
-		return err
-	}
-
-	pkgpath, err := copyLocalData(appdir)
-	if err != nil {
 		return err
 	}
 
@@ -160,10 +192,18 @@ func run(bin string, args []string) (err error) {
 	}
 	defer os.Chdir(oldwd)
 
+	// Setting up lldb is flaky. The test binary itself runs when
+	// started is set to true. Everything before that is considered
+	// part of the setup and is retried.
+	started := false
 	defer func() {
 		if r := recover(); r != nil {
 			if w, ok := r.(waitPanic); ok {
 				err = w.err
+				if !started {
+					fmt.Printf("lldb setup error: %v\n", err)
+					err = errRetry
+				}
 				return
 			}
 			panic(r)
@@ -196,6 +236,7 @@ func run(bin string, args []string) (err error) {
 	s.do(`process handle SIGHUP  --stop false --pass true --notify false`)
 	s.do(`process handle SIGPIPE --stop false --pass true --notify false`)
 	s.do(`process handle SIGUSR1 --stop false --pass true --notify false`)
+	s.do(`process handle SIGCONT --stop false --pass true --notify false`)
 	s.do(`process handle SIGSEGV --stop false --pass true --notify false`) // does not work
 	s.do(`process handle SIGBUS  --stop false --pass true --notify false`) // does not work
 
@@ -207,18 +248,9 @@ func run(bin string, args []string) (err error) {
 		return nil
 	}
 
-	s.do(`breakpoint set -n getwd`) // in runtime/cgo/gcc_darwin_arm.go
+	started = true
 
-	s.doCmd("run", "stop reason = breakpoint", 20*time.Second)
-
-	// Move the current working directory into the faux gopath.
-	if pkgpath != "src" {
-		s.do(`breakpoint delete 1`)
-		s.do(`expr char* $mem = (char*)malloc(512)`)
-		s.do(`expr $mem = (char*)getwd($mem, 512)`)
-		s.do(`expr $mem = (char*)strcat($mem, "/` + pkgpath + `")`)
-		s.do(`call (void)chdir($mem)`)
-	}
+	s.doCmd("run", "stop reason = signal SIGINT", 20*time.Second)
 
 	startTestsLen := s.out.Len()
 	fmt.Fprintln(s.in, `process continue`)
@@ -228,7 +260,9 @@ func run(bin string, args []string) (err error) {
 		return s.out.LastIndex([]byte("\nPASS\n")) > startTestsLen ||
 			s.out.LastIndex([]byte("\nPASS\r")) > startTestsLen ||
 			s.out.LastIndex([]byte("\n(lldb) PASS\n")) > startTestsLen ||
-			s.out.LastIndex([]byte("\n(lldb) PASS\r")) > startTestsLen
+			s.out.LastIndex([]byte("\n(lldb) PASS\r")) > startTestsLen ||
+			s.out.LastIndex([]byte("exited with status = 0 (0x00000000) \n")) > startTestsLen ||
+			s.out.LastIndex([]byte("exited with status = 0 (0x00000000) \r")) > startTestsLen
 	}
 	err = s.wait("test completion", passed, opts.timeout)
 	if passed(s.out) {
@@ -260,7 +294,11 @@ func newSession(appdir string, args []string, opts options) (*lldbSession, error
 		exited: make(chan error),
 	}
 
-	s.cmd = exec.Command(
+	iosdPath, err := exec.LookPath("ios-deploy")
+	if err != nil {
+		return nil, err
+	}
+	cmdArgs := []string{
 		// lldb tries to be clever with terminals.
 		// So we wrap it in script(1) and be clever
 		// right back at it.
@@ -268,14 +306,18 @@ func newSession(appdir string, args []string, opts options) (*lldbSession, error
 		"-q", "-t", "0",
 		"/dev/null",
 
-		"ios-deploy",
+		iosdPath,
 		"--debug",
 		"-u",
 		"-r",
 		"-n",
-		`--args=`+strings.Join(args, " ")+``,
+		`--args=` + strings.Join(args, " ") + ``,
 		"--bundle", appdir,
-	)
+	}
+	if deviceID != "" {
+		cmdArgs = append(cmdArgs, "--id", deviceID)
+	}
+	s.cmd = exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	if debug {
 		log.Println(strings.Join(s.cmd.Args, " "))
 	}
@@ -312,9 +354,8 @@ func newSession(appdir string, args []string, opts options) (*lldbSession, error
 		i2 := s.out.LastIndex([]byte(" connect"))
 		return i0 > 0 && i1 > 0 && i2 > 0
 	}
-	if err := s.wait("lldb start", cond, 5*time.Second); err != nil {
-		fmt.Printf("lldb start error: %v\n", err)
-		return nil, errRetry
+	if err := s.wait("lldb start", cond, 15*time.Second); err != nil {
+		panic(waitPanic{err})
 	}
 	return s, nil
 }
@@ -334,7 +375,7 @@ func (s *lldbSession) doCmd(cmd string, waitFor string, extraTimeout time.Durati
 }
 
 func (s *lldbSession) wait(reason string, cond func(out *buf) bool, extraTimeout time.Duration) error {
-	doTimeout := 1*time.Second + extraTimeout
+	doTimeout := 2*time.Second + extraTimeout
 	doTimedout := time.After(doTimeout)
 	for {
 		select {
@@ -411,7 +452,7 @@ func parseArgs(binArgs []string) (opts options, remainingArgs []string) {
 		remainingArgs = append(remainingArgs, arg)
 	}
 	f := flag.NewFlagSet("", flag.ContinueOnError)
-	f.DurationVar(&opts.timeout, "test.timeout", 0, "")
+	f.DurationVar(&opts.timeout, "test.timeout", 10*time.Minute, "")
 	f.BoolVar(&opts.lldb, "lldb", false, "")
 	f.Parse(flagArgs)
 	return opts, remainingArgs
@@ -484,16 +525,29 @@ func copyLocalData(dstbase string) (pkgpath string, err error) {
 		}
 	}
 
-	// Copy timezone file.
-	//
-	// Typical apps have the zoneinfo.zip in the root of their app bundle,
-	// read by the time package as the working directory at initialization.
-	// As we move the working directory to the GOROOT pkg directory, we
-	// install the zoneinfo.zip file in the pkgpath.
 	if underGoRoot {
+		// Copy timezone file.
+		//
+		// Typical apps have the zoneinfo.zip in the root of their app bundle,
+		// read by the time package as the working directory at initialization.
+		// As we move the working directory to the GOROOT pkg directory, we
+		// install the zoneinfo.zip file in the pkgpath.
 		err := cp(
 			filepath.Join(dstbase, pkgpath),
 			filepath.Join(cwd, "lib", "time", "zoneinfo.zip"),
+		)
+		if err != nil {
+			return "", err
+		}
+		// Copy src/runtime/textflag.h for (at least) Test386EndToEnd in
+		// cmd/asm/internal/asm.
+		runtimePath := filepath.Join(dstbase, "src", "runtime")
+		if err := os.MkdirAll(runtimePath, 0755); err != nil {
+			return "", err
+		}
+		err = cp(
+			filepath.Join(runtimePath, "textflag.h"),
+			filepath.Join(cwd, "src", "runtime", "textflag.h"),
 		)
 		if err != nil {
 			return "", err
@@ -535,7 +589,8 @@ func subdir() (pkgpath string, underGoRoot bool, err error) {
 	)
 }
 
-const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
+func infoPlist(pkgpath string) string {
+	return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -543,13 +598,15 @@ const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
 <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
 <key>CFBundleExecutable</key><string>gotest</string>
 <key>CFBundleVersion</key><string>1.0</string>
-<key>CFBundleIdentifier</key><string>golang.gotest</string>
+<key>CFBundleIdentifier</key><string>` + bundleID + `</string>
 <key>CFBundleResourceSpecification</key><string>ResourceRules.plist</string>
 <key>LSRequiresIPhoneOS</key><true/>
 <key>CFBundleDisplayName</key><string>gotest</string>
+<key>GoExecWrapperWorkingDirectory</key><string>` + pkgpath + `</string>
 </dict>
 </plist>
 `
+}
 
 func entitlementsPlist() string {
 	return `<?xml version="1.0" encoding="UTF-8"?>
@@ -557,11 +614,11 @@ func entitlementsPlist() string {
 <plist version="1.0">
 <dict>
 	<key>keychain-access-groups</key>
-	<array><string>` + appID + `.golang.gotest</string></array>
+	<array><string>` + appID + `</string></array>
 	<key>get-task-allow</key>
 	<true/>
 	<key>application-identifier</key>
-	<string>` + appID + `.golang.gotest</string>
+	<string>` + appID + `</string>
 	<key>com.apple.developer.team-identifier</key>
 	<string>` + teamID + `</string>
 </dict>

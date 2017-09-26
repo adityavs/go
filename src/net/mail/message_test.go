@@ -92,7 +92,7 @@ func TestDateParsing(t *testing.T) {
 			"Fri, 21 Nov 1997 09:55:06 -0600",
 			time.Date(1997, 11, 21, 9, 55, 6, 0, time.FixedZone("", -6*60*60)),
 		},
-		// RFC5322, Appendix A.6.2
+		// RFC 5322, Appendix A.6.2
 		// Obsolete date.
 		{
 			"21 Nov 97 09:55:06 GMT",
@@ -110,28 +110,43 @@ func TestDateParsing(t *testing.T) {
 		}
 		date, err := hdr.Date()
 		if err != nil {
-			t.Errorf("Failed parsing %q: %v", test.dateStr, err)
-			continue
+			t.Errorf("Header(Date: %s).Date(): %v", test.dateStr, err)
+		} else if !date.Equal(test.exp) {
+			t.Errorf("Header(Date: %s).Date() = %+v, want %+v", test.dateStr, date, test.exp)
 		}
-		if !date.Equal(test.exp) {
-			t.Errorf("Parse of %q: got %+v, want %+v", test.dateStr, date, test.exp)
+
+		date, err = ParseDate(test.dateStr)
+		if err != nil {
+			t.Errorf("ParseDate(%s): %v", test.dateStr, err)
+		} else if !date.Equal(test.exp) {
+			t.Errorf("ParseDate(%s) = %+v, want %+v", test.dateStr, date, test.exp)
 		}
 	}
 }
 
 func TestAddressParsingError(t *testing.T) {
-	const txt = "=?iso-8859-2?Q?Bogl=E1rka_Tak=E1cs?= <unknown@gmail.com>"
-	_, err := ParseAddress(txt)
-	if err == nil || !strings.Contains(err.Error(), "charset not supported") {
-		t.Errorf(`mail.ParseAddress(%q) err: %q, want ".*charset not supported.*"`, txt, err)
+	mustErrTestCases := [...]struct {
+		text        string
+		wantErrText string
+	}{
+		0:  {"=?iso-8859-2?Q?Bogl=E1rka_Tak=E1cs?= <unknown@gmail.com>", "charset not supported"},
+		1:  {"a@gmail.com b@gmail.com", "expected single address"},
+		2:  {string([]byte{0xed, 0xa0, 0x80}) + " <micro@example.net>", "invalid utf-8 in address"},
+		3:  {"\"" + string([]byte{0xed, 0xa0, 0x80}) + "\" <half-surrogate@example.com>", "invalid utf-8 in quoted-string"},
+		4:  {"\"\\" + string([]byte{0x80}) + "\" <escaped-invalid-unicode@example.net>", "invalid utf-8 in quoted-string"},
+		5:  {"\"\x00\" <null@example.net>", "bad character in quoted-string"},
+		6:  {"\"\\\x00\" <escaped-null@example.net>", "bad character in quoted-string"},
+		7:  {"John Doe", "no angle-addr"},
+		8:  {`<jdoe#machine.example>`, "missing @ in addr-spec"},
+		9:  {`John <middle> Doe <jdoe@machine.example>`, "missing @ in addr-spec"},
+		10: {"cfws@example.com (", "misformatted parenthetical comment"},
 	}
-}
 
-func TestAddressParsingErrorUnquotedNonASCII(t *testing.T) {
-	const txt = "µ <micro@example.net>"
-	_, err := ParseAddress(txt)
-	if err == nil || !strings.Contains(err.Error(), "unencoded non-ASCII text in address") {
-		t.Errorf(`mail.ParseAddress(%q) err: %q, want ".*unencoded non-ASCII text in address.*"`, txt, err)
+	for i, tc := range mustErrTestCases {
+		_, err := ParseAddress(tc.text)
+		if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
+			t.Errorf(`mail.ParseAddress(%q) #%d want %q, got %v`, tc.text, i, tc.wantErrText, err)
+		}
 	}
 }
 
@@ -164,6 +179,34 @@ func TestAddressParsing(t *testing.T) {
 			}},
 		},
 		{
+			`"John (middle) Doe" <jdoe@machine.example>`,
+			[]*Address{{
+				Name:    "John (middle) Doe",
+				Address: "jdoe@machine.example",
+			}},
+		},
+		{
+			`John (middle) Doe <jdoe@machine.example>`,
+			[]*Address{{
+				Name:    "John (middle) Doe",
+				Address: "jdoe@machine.example",
+			}},
+		},
+		{
+			`John !@M@! Doe <jdoe@machine.example>`,
+			[]*Address{{
+				Name:    "John !@M@! Doe",
+				Address: "jdoe@machine.example",
+			}},
+		},
+		{
+			`"John <middle> Doe" <jdoe@machine.example>`,
+			[]*Address{{
+				Name:    "John <middle> Doe",
+				Address: "jdoe@machine.example",
+			}},
+		},
+		{
 			`Mary Smith <mary@x.test>, jdoe@example.org, Who? <one@y.test>`,
 			[]*Address{
 				{
@@ -190,6 +233,14 @@ func TestAddressParsing(t *testing.T) {
 					Address: "sysservices@example.net",
 				},
 			},
+		},
+		// RFC 5322, Appendix A.6.1
+		{
+			`Joe Q. Public <john.q.public@example.com>`,
+			[]*Address{{
+				Name:    "Joe Q. Public",
+				Address: "john.q.public@example.com",
+			}},
 		},
 		// RFC 5322, Appendix A.1.3
 		// TODO(dsymonds): Group addresses.
@@ -220,6 +271,16 @@ func TestAddressParsing(t *testing.T) {
 			[]*Address{
 				{
 					Name:    `Jörg Doe`,
+					Address: "joerg@example.com",
+				},
+			},
+		},
+		// RFC 2047 "Q"-encoded UTF-8 address with multiple encoded-words.
+		{
+			`=?utf-8?q?J=C3=B6rg?=  =?utf-8?q?Doe?= <joerg@example.com>`,
+			[]*Address{
+				{
+					Name:    `JörgDoe`,
 					Address: "joerg@example.com",
 				},
 			},
@@ -261,6 +322,79 @@ func TestAddressParsing(t *testing.T) {
 				{
 					Name:    `Asem H.`,
 					Address: "noreply@example.com",
+				},
+			},
+		},
+		// RFC 6532 3.2.3, qtext /= UTF8-non-ascii
+		{
+			`"Gø Pher" <gopher@example.com>`,
+			[]*Address{
+				{
+					Name:    `Gø Pher`,
+					Address: "gopher@example.com",
+				},
+			},
+		},
+		// RFC 6532 3.2, atext /= UTF8-non-ascii
+		{
+			`µ <micro@example.com>`,
+			[]*Address{
+				{
+					Name:    `µ`,
+					Address: "micro@example.com",
+				},
+			},
+		},
+		// RFC 6532 3.2.2, local address parts allow UTF-8
+		{
+			`Micro <µ@example.com>`,
+			[]*Address{
+				{
+					Name:    `Micro`,
+					Address: "µ@example.com",
+				},
+			},
+		},
+		// RFC 6532 3.2.4, domains parts allow UTF-8
+		{
+			`Micro <micro@µ.example.com>`,
+			[]*Address{
+				{
+					Name:    `Micro`,
+					Address: "micro@µ.example.com",
+				},
+			},
+		},
+		// Issue 14866
+		{
+			`"" <emptystring@example.com>`,
+			[]*Address{
+				{
+					Name:    "",
+					Address: "emptystring@example.com",
+				},
+			},
+		},
+		// CFWS
+		{
+			`cfws@example.com (CFWS (cfws))  (another comment)`,
+			[]*Address{
+				{
+					Name:    "",
+					Address: "cfws@example.com",
+				},
+			},
+		},
+		{
+			`cfws@example.com ()  (another comment), cfws2@example.com (another)`,
+			[]*Address{
+				{
+					Name:    "",
+					Address: "cfws@example.com",
+				},
+				{
+					Name:    "",
+					Address: "cfws2@example.com",
 				},
 			},
 		},
@@ -515,6 +649,11 @@ func TestAddressString(t *testing.T) {
 			&Address{Name: "world?=", Address: "hello@world.com"},
 			`"world?=" <hello@world.com>`,
 		},
+		{
+			// should q-encode even for invalid utf-8.
+			&Address{Name: string([]byte{0xed, 0xa0, 0x80}), Address: "invalid-utf8@example.net"},
+			"=?utf-8?q?=ED=A0=80?= <invalid-utf8@example.net>",
+		},
 	}
 	for _, test := range tests {
 		s := test.addr.String()
@@ -610,7 +749,6 @@ func TestAddressParsingAndFormatting(t *testing.T) {
 		`< @example.com>`,
 		`<""test""blah""@example.com>`,
 		`<""@0>`,
-		"<\"\t0\"@0>",
 	}
 
 	for _, test := range badTests {

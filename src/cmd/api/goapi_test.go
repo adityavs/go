@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"go/build"
+	"internal/testenv"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -163,7 +164,7 @@ func TestSkipInternal(t *testing.T) {
 }
 
 func BenchmarkAll(b *testing.B) {
-	stds, err := exec.Command("go", "list", "std").Output()
+	stds, err := exec.Command(testenv.GoToolPath(b), "list", "std").Output()
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -178,7 +179,7 @@ func BenchmarkAll(b *testing.B) {
 		for _, context := range contexts {
 			w := NewWalker(context, filepath.Join(build.Default.GOROOT, "src"))
 			for _, name := range pkgNames {
-				if name != "unsafe" && !strings.HasPrefix(name, "cmd/") {
+				if name != "unsafe" && !strings.HasPrefix(name, "cmd/") && !internalPkg.MatchString(name) {
 					pkg, _ := w.Import(name)
 					w.export(pkg)
 				}

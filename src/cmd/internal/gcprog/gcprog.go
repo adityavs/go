@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -37,7 +37,6 @@ const progMaxLiteral = 127 // maximum n for literal n bit code
 // to describe the data type, and then finally call End.
 type Writer struct {
 	writeByte func(byte)
-	symoff    int
 	index     int64
 	b         [progMaxLiteral]byte
 	nb        int

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/bits"
 	"sync"
 )
 
@@ -262,7 +263,7 @@ func (x nat) itoa(neg bool, base int) []byte {
 	// convert power of two and non power of two bases separately
 	if b := Word(base); b == b&-b {
 		// shift is base b digit size in bits
-		shift := trailingZeroBits(b) // shift > 0 because b >= 2
+		shift := uint(bits.TrailingZeros(uint(b))) // shift > 0 because b >= 2
 		mask := Word(1<<shift - 1)
 		w := x[0]         // current word
 		nbits := uint(_W) // number of unprocessed bits in w
@@ -302,7 +303,7 @@ func (x nat) itoa(neg bool, base int) []byte {
 		}
 
 	} else {
-		bb, ndigits := maxPow(Word(b))
+		bb, ndigits := maxPow(b)
 
 		// construct table of successive squares of bb*leafSize to use in subdivisions
 		// result (table != nil) <=> (len(x) > leafSize > 0)
@@ -391,7 +392,7 @@ func (q nat) convertWords(s []byte, b Word, ndigits int, bb Word, table []diviso
 				// this appears to be faster for BenchmarkString10000Base10
 				// and smaller strings (but a bit slower for larger ones)
 				t := r / 10
-				s[i] = '0' + byte(r-t<<3-t-t) // TODO(gri) replace w/ t*10 once compiler produces better code
+				s[i] = '0' + byte(r-t*10)
 				r = t
 			}
 		}
@@ -468,7 +469,7 @@ func divisors(m int, b Word, ndigits int, bb Word) []divisor {
 					table[0].bbb = nat(nil).expWW(bb, Word(leafSize))
 					table[0].ndigits = ndigits * leafSize
 				} else {
-					table[i].bbb = nat(nil).mul(table[i-1].bbb, table[i-1].bbb)
+					table[i].bbb = nat(nil).sqr(table[i-1].bbb)
 					table[i].ndigits = 2 * table[i-1].ndigits
 				}
 

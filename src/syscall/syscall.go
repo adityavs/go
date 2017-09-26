@@ -3,10 +3,10 @@
 // license that can be found in the LICENSE file.
 
 // Package syscall contains an interface to the low-level operating system
-// primitives.  The details vary depending on the underlying system, and
+// primitives. The details vary depending on the underlying system, and
 // by default, godoc will display the syscall documentation for the current
-// system.  If you want godoc to display syscall documentation for another
-// system, set $GOOS and $GOARCH to the desired system.  For example, if
+// system. If you want godoc to display syscall documentation for another
+// system, set $GOOS and $GOARCH to the desired system. For example, if
 // you want to view documentation for freebsd/arm on linux/amd64, set $GOOS
 // to freebsd and $GOARCH to arm.
 // The primary use of syscall is inside other packages that provide a more
@@ -22,11 +22,14 @@
 // Go repository should be migrated to use the corresponding
 // package in the golang.org/x/sys repository. That is also where updates
 // required by new systems or versions should be applied.
-// See https://golang.org/s/go1.4-syscall for more information.
+// Signal, Errno and SysProcAttr are not yet available in
+// golang.org/x/sys and must still be referenced from the
+// syscall package. See https://golang.org/s/go1.4-syscall
+// for more information.
 //
 package syscall
 
-import "unsafe"
+//go:generate go run mksyscall_windows.go -systemdll -output zsyscall_windows.go syscall_windows.go security_windows.go
 
 // StringByteSlice converts a string to a NUL-terminated []byte,
 // If s contains a NUL byte this function panics instead of
@@ -93,7 +96,6 @@ func (tv *Timeval) Nano() int64 {
 	return int64(tv.Sec)*1e9 + int64(tv.Usec)*1000
 }
 
-// use is a no-op, but the compiler cannot see that it is.
-// Calling use(p) ensures that p is kept live until that point.
-//go:noescape
-func use(p unsafe.Pointer)
+// Getpagesize is provided by the runtime.
+
+func Getpagesize() int

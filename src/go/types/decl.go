@@ -81,7 +81,7 @@ func (check *Checker) objDecl(obj Object, def *Named, path []*TypeName) {
 		check.varDecl(obj, d.lhs, d.typ, d.init)
 	case *TypeName:
 		// invalid recursive types are detected via path
-		check.typeDecl(obj, d.typ, def, path)
+		check.typeDecl(obj, d.typ, def, path, d.alias)
 	case *Func:
 		// functions may be recursive - no need to track dependencies
 		check.funcDecl(obj, d)
@@ -141,6 +141,14 @@ func (check *Checker) varDecl(obj *Var, lhs []*Var, typ, init ast.Expr) {
 	// determine type, if any
 	if typ != nil {
 		obj.typ = check.typ(typ)
+		// We cannot spread the type to all lhs variables if there
+		// are more than one since that would mark them as checked
+		// (see Checker.objDecl) and the assignment of init exprs,
+		// if any, would not be checked.
+		//
+		// TODO(gri) If we have no init expr, we should distribute
+		// a given type otherwise we need to re-evalate the type
+		// expr for each lhs variable, leading to duplicate work.
 	}
 
 	// check initialization
@@ -173,6 +181,17 @@ func (check *Checker) varDecl(obj *Var, lhs []*Var, typ, init ast.Expr) {
 			panic("inconsistent lhs")
 		}
 	}
+
+	// We have multiple variables on the lhs and one init expr.
+	// Make sure all variables have been given the same type if
+	// one was specified, otherwise they assume the type of the
+	// init expression values (was issue #15755).
+	if typ != nil {
+		for _, lhs := range lhs {
+			lhs.typ = obj.typ
+		}
+	}
+
 	check.initVars(lhs, []ast.Expr{init}, token.NoPos)
 }
 
@@ -196,33 +215,42 @@ func (n *Named) setUnderlying(typ Type) {
 	}
 }
 
-func (check *Checker) typeDecl(obj *TypeName, typ ast.Expr, def *Named, path []*TypeName) {
+func (check *Checker) typeDecl(obj *TypeName, typ ast.Expr, def *Named, path []*TypeName, alias bool) {
 	assert(obj.typ == nil)
 
 	// type declarations cannot use iota
 	assert(check.iota == nil)
 
-	named := &Named{obj: obj}
-	def.setUnderlying(named)
-	obj.typ = named // make sure recursive type declarations terminate
+	if alias {
 
-	// determine underlying type of named
-	check.typExpr(typ, named, append(path, obj))
+		obj.typ = Typ[Invalid]
+		obj.typ = check.typExpr(typ, nil, append(path, obj))
 
-	// The underlying type of named may be itself a named type that is
-	// incomplete:
-	//
-	//	type (
-	//		A B
-	//		B *C
-	//		C A
-	//	)
-	//
-	// The type of C is the (named) type of A which is incomplete,
-	// and which has as its underlying type the named type B.
-	// Determine the (final, unnamed) underlying type by resolving
-	// any forward chain (they always end in an unnamed type).
-	named.underlying = underlying(named.underlying)
+	} else {
+
+		named := &Named{obj: obj}
+		def.setUnderlying(named)
+		obj.typ = named // make sure recursive type declarations terminate
+
+		// determine underlying type of named
+		check.typExpr(typ, named, append(path, obj))
+
+		// The underlying type of named may be itself a named type that is
+		// incomplete:
+		//
+		//	type (
+		//		A B
+		//		B *C
+		//		C A
+		//	)
+		//
+		// The type of C is the (named) type of A which is incomplete,
+		// and which has as its underlying type the named type B.
+		// Determine the (final, unnamed) underlying type by resolving
+		// any forward chain (they always end in an unnamed type).
+		named.underlying = underlying(named.underlying)
+
+	}
 
 	// check and add associated methods
 	// TODO(gri) It's easy to create pathological cases where the
@@ -245,21 +273,23 @@ func (check *Checker) addMethodDecls(obj *TypeName) {
 
 	// spec: "If the base type is a struct type, the non-blank method
 	// and field names must be distinct."
-	base := obj.typ.(*Named)
-	if t, _ := base.underlying.(*Struct); t != nil {
-		for _, fld := range t.fields {
-			if fld.name != "_" {
-				assert(mset.insert(fld) == nil)
+	base, _ := obj.typ.(*Named) // nil if receiver base type is type alias
+	if base != nil {
+		if t, _ := base.underlying.(*Struct); t != nil {
+			for _, fld := range t.fields {
+				if fld.name != "_" {
+					assert(mset.insert(fld) == nil)
+				}
 			}
 		}
-	}
 
-	// Checker.Files may be called multiple times; additional package files
-	// may add methods to already type-checked types. Add pre-existing methods
-	// so that we can detect redeclarations.
-	for _, m := range base.methods {
-		assert(m.name != "_")
-		assert(mset.insert(m) == nil)
+		// Checker.Files may be called multiple times; additional package files
+		// may add methods to already type-checked types. Add pre-existing methods
+		// so that we can detect redeclarations.
+		for _, m := range base.methods {
+			assert(m.name != "_")
+			assert(mset.insert(m) == nil)
+		}
 	}
 
 	// type-check methods
@@ -272,7 +302,7 @@ func (check *Checker) addMethodDecls(obj *TypeName) {
 				case *Var:
 					check.errorf(m.pos, "field and method with the same name %s", m.name)
 				case *Func:
-					check.errorf(m.pos, "method %s already declared for %s", m.name, base)
+					check.errorf(m.pos, "method %s already declared for %s", m.name, obj)
 				default:
 					unreachable()
 				}
@@ -280,9 +310,12 @@ func (check *Checker) addMethodDecls(obj *TypeName) {
 				continue
 			}
 		}
+
+		// type-check
 		check.objDecl(m, nil, nil)
+
 		// methods with blank _ names cannot be found - don't keep them
-		if m.name != "_" {
+		if base != nil && m.name != "_" {
 			base.methods = append(base.methods, m)
 		}
 	}
@@ -417,7 +450,7 @@ func (check *Checker) declStmt(decl ast.Decl) {
 				// the innermost containing block."
 				scopePos := s.Name.Pos()
 				check.declare(check.scope, s.Name, obj, scopePos)
-				check.typeDecl(obj, s.Type, nil, nil)
+				check.typeDecl(obj, s.Type, nil, nil, s.Assign.IsValid())
 
 			default:
 				check.invalidAST(s.Pos(), "const, type, or var declaration expected")

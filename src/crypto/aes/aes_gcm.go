@@ -45,8 +45,11 @@ var errOpen = errors.New("cipher: message authentication failed")
 // will use the optimised implementation in this file when possible. Instances
 // of this type only exist when hasGCMAsm returns true.
 type aesCipherGCM struct {
-	aesCipher
+	aesCipherAsm
 }
+
+// Assert that aesCipherGCM implements the gcmAble interface.
+var _ gcmAble = (*aesCipherGCM)(nil)
 
 // NewGCM returns the AES cipher wrapped in Galois Counter Mode. This is only
 // called by crypto/cipher.NewGCM via the gcmAble interface.
@@ -96,6 +99,9 @@ func (g *gcmAsm) Seal(dst, nonce, plaintext, data []byte) []byte {
 	if len(nonce) != g.nonceSize {
 		panic("cipher: incorrect nonce length given to GCM")
 	}
+	if uint64(len(plaintext)) > ((1<<32)-2)*BlockSize {
+		panic("cipher: message too large for GCM")
+	}
 
 	var counter, tagMask [gcmBlockSize]byte
 
@@ -134,6 +140,10 @@ func (g *gcmAsm) Open(dst, nonce, ciphertext, data []byte) ([]byte, error) {
 	if len(ciphertext) < gcmTagSize {
 		return nil, errOpen
 	}
+	if uint64(len(ciphertext)) > ((1<<32)-2)*BlockSize+gcmTagSize {
+		return nil, errOpen
+	}
+
 	tag := ciphertext[len(ciphertext)-gcmTagSize:]
 	ciphertext = ciphertext[:len(ciphertext)-gcmTagSize]
 

@@ -39,13 +39,14 @@
 #define SYS_thr_kill (SYS_BASE + 433)
 #define SYS__umtx_op (SYS_BASE + 454)
 #define SYS_thr_new (SYS_BASE + 455)
-#define SYS_mmap (SYS_BASE + 477) 
-	
+#define SYS_mmap (SYS_BASE + 477)
+#define SYS_cpuset_getaffinity (SYS_BASE + 487)
+
 TEXT runtime·sys_umtx_op(SB),NOSPLIT,$0
 	MOVW addr+0(FP), R0
 	MOVW mode+4(FP), R1
 	MOVW val+8(FP), R2
-	MOVW ptr2+12(FP), R3
+	MOVW uaddr1+12(FP), R3
 	ADD $20, R13 // arg 5 is passed on stack
 	MOVW $SYS__umtx_op, R7
 	SWI $0
@@ -166,8 +167,8 @@ TEXT runtime·setitimer(SB), NOSPLIT, $-8
 	SWI $0
 	RET
 
-// func now() (sec int64, nsec int32)
-TEXT time·now(SB), NOSPLIT, $32
+// func walltime() (sec int64, nsec int32)
+TEXT runtime·walltime(SB), NOSPLIT, $32
 	MOVW $0, R0 // CLOCK_REALTIME
 	MOVW $8(R13), R1
 	MOVW $SYS_clock_gettime, R7
@@ -216,7 +217,7 @@ TEXT runtime·sigaction(SB),NOSPLIT,$-8
 	MOVW.CS R8, (R8)
 	RET
 
-TEXT runtime·sigtramp(SB),NOSPLIT,$24
+TEXT runtime·sigtramp(SB),NOSPLIT,$12
 	// this might be called in external code context,
 	// where g is not set.
 	// first save R0, because runtime·load_g will clobber it
@@ -225,30 +226,9 @@ TEXT runtime·sigtramp(SB),NOSPLIT,$24
 	CMP 	$0, R0
 	BL.NE	runtime·load_g(SB)
 
-	CMP $0, g
-	BNE 4(PC)
-	// signal number is already prepared in 4(R13)
-	MOVW $runtime·badsignal(SB), R11
-	BL (R11)
-	RET
-
-	// save g
-	MOVW g, R4
-	MOVW g, 20(R13)
-
-	// g = m->signal
-	MOVW g_m(g), R8
-	MOVW m_gsignal(R8), g
-
-	// R0 is already saved
-	MOVW R1, 8(R13) // info
-	MOVW R2, 12(R13) // context
-	MOVW R4, 16(R13) // oldg
-
-	BL runtime·sighandler(SB)
-
-	// restore g
-	MOVW 20(R13), g
+	MOVW	R1, 8(R13)
+	MOVW	R2, 12(R13)
+	BL	runtime·sigtrampgo(SB)
 	RET
 
 TEXT runtime·mmap(SB),NOSPLIT,$16
@@ -298,6 +278,18 @@ TEXT runtime·sigaltstack(SB),NOSPLIT,$-8
 	SWI $0
 	MOVW.CS $0, R8 // crash on syscall failure
 	MOVW.CS R8, (R8)
+	RET
+
+TEXT runtime·sigfwd(SB),NOSPLIT,$0-16
+	MOVW	sig+4(FP), R0
+	MOVW	info+8(FP), R1
+	MOVW	ctx+12(FP), R2
+	MOVW	fn+0(FP), R11
+	MOVW	R13, R4
+	SUB	$24, R13
+	BIC	$0x7, R13 // alignment for ELF ABI
+	BL	(R11)
+	MOVW	R4, R13
 	RET
 
 TEXT runtime·usleep(SB),NOSPLIT,$16
@@ -384,4 +376,18 @@ TEXT ·publicationBarrier(SB),NOSPLIT,$-4-0
 // TODO(minux): this only supports ARMv6K+.
 TEXT runtime·read_tls_fallback(SB),NOSPLIT,$-4
 	WORD $0xee1d0f70 // mrc p15, 0, r0, c13, c0, 3
+	RET
+
+// func cpuset_getaffinity(level int, which int, id int64, size int, mask *byte) int32
+TEXT runtime·cpuset_getaffinity(SB), NOSPLIT, $0-28
+	MOVW	level+0(FP), R0
+	MOVW	which+4(FP), R1
+	MOVW	id_lo+8(FP), R2
+	MOVW	id_hi+12(FP), R3
+	ADD	$20, R13	// Pass size and mask on stack.
+	MOVW	$SYS_cpuset_getaffinity, R7
+	SWI	$0
+	RSB.CS	$0, R0
+	SUB	$20, R13
+	MOVW	R0, ret+24(FP)
 	RET

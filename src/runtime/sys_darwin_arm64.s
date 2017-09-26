@@ -19,7 +19,6 @@
 #define	SYS_mmap           197
 #define	SYS_munmap         73
 #define	SYS_madvise        75
-#define	SYS_mincore        78
 #define	SYS_gettimeofday   116
 #define	SYS_kill           37
 #define	SYS_getpid         20
@@ -151,13 +150,18 @@ TEXT runtime·setitimer(SB),NOSPLIT,$0
 	SVC	$0x80
 	RET
 
-TEXT time·now(SB),NOSPLIT,$40-12
+TEXT runtime·walltime(SB),NOSPLIT,$40-12
 	MOVD	RSP, R0	// timeval
 	MOVD	R0, R9	// this is how dyld calls gettimeofday
 	MOVW	$0, R1	// zone
+	MOVD	$0, R2	// see issue 16570
 	MOVW	$SYS_gettimeofday, R16
 	SVC	$0x80	// Note: x0 is tv_sec, w1 is tv_usec
-
+	CMP	$0, R0
+	BNE	inreg
+	MOVD	0(RSP), R0
+	MOVW	8(RSP), R1
+inreg:
 	MOVD	R0, sec+0(FP)
 	MOVW	$1000, R3
 	MUL	R3, R1
@@ -168,9 +172,14 @@ TEXT runtime·nanotime(SB),NOSPLIT,$40
 	MOVD	RSP, R0	// timeval
 	MOVD	R0, R9	// this is how dyld calls gettimeofday
 	MOVW	$0, R1	// zone
+	MOVD	$0, R2	// see issue 16570
 	MOVW	$SYS_gettimeofday, R16
 	SVC	$0x80	// Note: x0 is tv_sec, w1 is tv_usec
-
+	CMP	$0, R0
+	BNE	inreg
+	MOVD	0(RSP), R0
+	MOVW	8(RSP), R1
+inreg:
 	MOVW	$1000000000, R3
 	MUL	R3, R0
 	MOVW	$1000, R3
@@ -178,6 +187,14 @@ TEXT runtime·nanotime(SB),NOSPLIT,$40
 	ADD	R1, R0
 
 	MOVD	R0, ret+0(FP)
+	RET
+
+TEXT runtime·sigfwd(SB),NOSPLIT,$0-32
+	MOVW	sig+8(FP), R0
+	MOVD	info+16(FP), R1
+	MOVD	ctx+24(FP), R2
+	MOVD	fn+0(FP), R11
+	BL	(R11)
 	RET
 
 // Sigtramp's job is to call the actual signal handler.
@@ -237,7 +254,7 @@ cont:
 	MOVD	R1, 48(R6)
 
 	// switch stack and g
-	MOVD	R6, RSP	// sigtramp can not re-entrant, so no need to back up RSP.
+	MOVD	R6, RSP	// sigtramp is not re-entrant, so no need to back up RSP.
 	MOVD	R5, g
 
 	BL	(R0)
@@ -253,7 +270,7 @@ ret:
 	B	runtime·exit(SB)
 
 TEXT runtime·sigprocmask(SB),NOSPLIT,$0
-	MOVW	sig+0(FP), R0
+	MOVW	how+0(FP), R0
 	MOVD	new+8(FP), R1
 	MOVD	old+16(FP), R2
 	MOVW	$SYS_pthread_sigmask, R16

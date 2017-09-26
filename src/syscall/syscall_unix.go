@@ -23,6 +23,7 @@ const (
 	darwin64Bit    = runtime.GOOS == "darwin" && sizeofPtr == 8
 	dragonfly64Bit = runtime.GOOS == "dragonfly" && sizeofPtr == 8
 	netbsd32Bit    = runtime.GOOS == "netbsd" && sizeofPtr == 4
+	solaris64Bit   = runtime.GOOS == "solaris" && sizeofPtr == 8
 )
 
 func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno)
@@ -91,7 +92,7 @@ func (m *mmapper) Munmap(data []byte) (err error) {
 }
 
 // An Errno is an unsigned number describing an error condition.
-// It implements the error interface.  The zero Errno is by convention
+// It implements the error interface. The zero Errno is by convention
 // a non-error, so code to convert from Errno to error should use:
 //	err = nil
 //	if errno != 0 {

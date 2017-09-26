@@ -20,7 +20,8 @@ The input text for a template is UTF-8-encoded text in any format.
 "{{" and "}}"; all text outside actions is copied to the output unchanged.
 Except for raw strings, actions may not span newlines, although comments can.
 
-Once parsed, a template may be executed safely in parallel.
+Once parsed, a template may be executed safely in parallel, although if parallel
+executions share a Writer the output may be interleaved.
 
 Here is a trivial example that prints "17 items are made of wool".
 
@@ -64,7 +65,7 @@ space, horizontal tab, carriage return, and newline.
 Actions
 
 Here is the list of actions. "Arguments" and "pipelines" are evaluations of
-data, defined in detail below.
+data, defined in detail in the corresponding sections that follow.
 
 */
 //	{{/* a comment */}}
@@ -74,19 +75,20 @@ data, defined in detail below.
 /*
 
 	{{pipeline}}
-		The default textual representation of the value of the pipeline
-		is copied to the output.
+		The default textual representation (the same as would be
+		printed by fmt.Print) of the value of the pipeline is copied
+		to the output.
 
 	{{if pipeline}} T1 {{end}}
 		If the value of the pipeline is empty, no output is generated;
-		otherwise, T1 is executed.  The empty values are false, 0, any
+		otherwise, T1 is executed. The empty values are false, 0, any
 		nil pointer or interface value, and any array, slice, map, or
 		string of length zero.
 		Dot is unaffected.
 
 	{{if pipeline}} T1 {{else}} T0 {{end}}
 		If the value of the pipeline is empty, T0 is executed;
-		otherwise, T1 is executed.  Dot is unaffected.
+		otherwise, T1 is executed. Dot is unaffected.
 
 	{{if pipeline}} T1 {{else if pipeline}} T0 {{end}}
 		To simplify the appearance of if-else chains, the else action
@@ -200,6 +202,8 @@ field of a struct, the function is not invoked automatically, but it
 can be used as a truth value for an if action and the like. To invoke
 it, use the call function, defined below.
 
+Pipelines
+
 A pipeline is a possibly chained sequence of "commands". A command is a simple
 value (argument) or a function or method call, possibly with multiple arguments:
 
@@ -217,10 +221,8 @@ value (argument) or a function or method call, possibly with multiple arguments:
 			function(Argument1, etc.)
 		Functions and function names are described below.
 
-Pipelines
-
 A pipeline may be "chained" by separating a sequence of commands with pipeline
-characters '|'. In a chained pipeline, the result of the each command is
+characters '|'. In a chained pipeline, the result of each command is
 passed as the last argument of the following command. The output of the final
 command in the pipeline is the value of the pipeline.
 
@@ -240,19 +242,19 @@ where $variable is the name of the variable. An action that declares a
 variable produces no output.
 
 If a "range" action initializes a variable, the variable is set to the
-successive elements of the iteration.  Also, a "range" may declare two
+successive elements of the iteration. Also, a "range" may declare two
 variables, separated by a comma:
 
 	range $index, $element := pipeline
 
 in which case $index and $element are set to the successive values of the
-array/slice index or map key and element, respectively.  Note that if there is
+array/slice index or map key and element, respectively. Note that if there is
 only one variable, it is assigned the element; this is opposite to the
 convention in Go range clauses.
 
 A variable's scope extends to the "end" action of the control structure ("if",
 "with", or "range") in which it is declared, or to the end of the template if
-there is no such control structure.  A template invocation does not inherit
+there is no such control structure. A template invocation does not inherit
 variables from the point of its invocation.
 
 When execution begins, $ is set to the data argument passed to Execute, that is,
@@ -313,7 +315,8 @@ Predefined global functions are named as follows.
 		or the returned error value is non-nil, execution stops.
 	html
 		Returns the escaped HTML equivalent of the textual
-		representation of its arguments.
+		representation of its arguments. This function is unavailable
+		in html/template, with a few exceptions.
 	index
 		Returns the result of indexing its first argument by the
 		following arguments. Thus "index x 1 2 3" is, in Go syntax,
@@ -339,6 +342,8 @@ Predefined global functions are named as follows.
 	urlquery
 		Returns the escaped value of the textual representation of
 		its arguments in a form suitable for embedding in a URL query.
+		This function is unavailable in html/template, with a few
+		exceptions.
 
 The boolean functions take any zero value to be false and a non-zero
 value to be true.

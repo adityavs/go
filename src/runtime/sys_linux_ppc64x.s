@@ -21,6 +21,7 @@
 #define SYS_close		  6
 #define SYS_getpid		 20
 #define SYS_kill		 37
+#define SYS_brk			 45
 #define SYS_fcntl		 55
 #define SYS_gettimeofday	 78
 #define SYS_select		 82	// always return -ENOSYS
@@ -153,18 +154,17 @@ TEXT runtime·mincore(SB),NOSPLIT|NOFRAME,$0-28
 	MOVD	n+8(FP), R4
 	MOVD	dst+16(FP), R5
 	SYSCALL	$SYS_mincore
+	NEG	R3		// caller expects negative errno
 	MOVW	R3, ret+24(FP)
 	RET
 
-// func now() (sec int64, nsec int32)
-TEXT time·now(SB),NOSPLIT,$16
-	MOVD	$0(R1), R3
-	MOVD	$0, R4
-	SYSCALL	$SYS_gettimeofday
+// func walltime() (sec int64, nsec int32)
+TEXT runtime·walltime(SB),NOSPLIT,$16
+	MOVD	$0, R3 // CLOCK_REALTIME
+	MOVD	$0(R1), R4
+	SYSCALL	$SYS_clock_gettime
 	MOVD	0(R1), R3	// sec
-	MOVD	8(R1), R5	// usec
-	MOVD	$1000, R4
-	MULLD	R4, R5
+	MOVD	8(R1), R5	// nsec
 	MOVD	R3, sec+0(FP)
 	MOVW	R5, nsec+8(FP)
 	RET
@@ -184,13 +184,13 @@ TEXT runtime·nanotime(SB),NOSPLIT,$16
 	RET
 
 TEXT runtime·rtsigprocmask(SB),NOSPLIT|NOFRAME,$0-28
-	MOVW	sig+0(FP), R3
+	MOVW	how+0(FP), R3
 	MOVD	new+8(FP), R4
 	MOVD	old+16(FP), R5
 	MOVW	size+24(FP), R6
 	SYSCALL	$SYS_rt_sigprocmask
 	BVC	2(PC)
-	MOVD	R0, 0xf1(R0)	// crash
+	MOVD	R0, 0xf0(R0)	// crash
 	RET
 
 TEXT runtime·rt_sigaction(SB),NOSPLIT|NOFRAME,$0-36
@@ -242,6 +242,21 @@ TEXT runtime·_sigtramp(SB),NOSPLIT,$64
 	MOVD	24(R1), R2
 	RET
 
+#ifdef GOARCH_ppc64le
+// ppc64le doesn't need function descriptors
+TEXT runtime·cgoSigtramp(SB),NOSPLIT,$0
+#else
+// function descriptor for the real sigtramp
+TEXT runtime·cgoSigtramp(SB),NOSPLIT|NOFRAME,$0
+	DWORD	$runtime·_cgoSigtramp(SB)
+	DWORD	$0
+	DWORD	$0
+TEXT runtime·_cgoSigtramp(SB),NOSPLIT,$0
+#endif
+	MOVD	$runtime·sigtramp(SB), R12
+	MOVD	R12, CTR
+	JMP	(CTR)
+
 TEXT runtime·mmap(SB),NOSPLIT|NOFRAME,$0
 	MOVD	addr+0(FP), R3
 	MOVD	n+8(FP), R4
@@ -259,7 +274,7 @@ TEXT runtime·munmap(SB),NOSPLIT|NOFRAME,$0
 	MOVD	n+8(FP), R4
 	SYSCALL	$SYS_munmap
 	BVC	2(PC)
-	MOVD	R0, 0xf3(R0)
+	MOVD	R0, 0xf0(R0)
 	RET
 
 TEXT runtime·madvise(SB),NOSPLIT|NOFRAME,$0
@@ -290,8 +305,8 @@ TEXT runtime·clone(SB),NOSPLIT|NOFRAME,$0
 
 	// Copy mp, gp, fn off parent stack for use by child.
 	// Careful: Linux system call clobbers ???.
-	MOVD	mm+16(FP), R7
-	MOVD	gg+24(FP), R8
+	MOVD	mp+16(FP), R7
+	MOVD	gp+24(FP), R8
 	MOVD	fn+32(FP), R12
 
 	MOVD	R7, -8(R4)
@@ -352,7 +367,7 @@ TEXT runtime·sigaltstack(SB),NOSPLIT|NOFRAME,$0
 	MOVD	old+8(FP), R4
 	SYSCALL	$SYS_sigaltstack
 	BVC	2(PC)
-	MOVD	R0, 0xf1(R0)  // crash
+	MOVD	R0, 0xf0(R0)  // crash
 	RET
 
 TEXT runtime·osyield(SB),NOSPLIT|NOFRAME,$0
@@ -407,4 +422,12 @@ TEXT runtime·closeonexec(SB),NOSPLIT|NOFRAME,$0
 	MOVD    $2, R4  // F_SETFD
 	MOVD    $1, R5  // FD_CLOEXEC
 	SYSCALL	$SYS_fcntl
+	RET
+
+// func sbrk0() uintptr
+TEXT runtime·sbrk0(SB),NOSPLIT|NOFRAME,$0
+	// Implemented as brk(NULL).
+	MOVD	$0, R3
+	SYSCALL	$SYS_brk
+	MOVD	R3, ret+0(FP)
 	RET

@@ -1,9 +1,12 @@
 package ld
 
 import (
-	"cmd/internal/obj"
+	"cmd/internal/bio"
+	"cmd/internal/objabi"
+	"cmd/internal/sys"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 	"sort"
 )
@@ -40,8 +43,8 @@ const (
 	N_STAB = 0xe0
 )
 
-type LdMachoObj struct {
-	f          *obj.Biobuf
+type ldMachoObj struct {
+	f          *bio.Reader
 	base       int64 // off in f where Mach-O begins
 	length     int64 // length of Mach-O
 	is64       bool
@@ -51,20 +54,20 @@ type LdMachoObj struct {
 	subcputype uint
 	filetype   uint32
 	flags      uint32
-	cmd        []LdMachoCmd
+	cmd        []ldMachoCmd
 	ncmd       uint
 }
 
-type LdMachoCmd struct {
+type ldMachoCmd struct {
 	type_ int
 	off   uint32
 	size  uint32
-	seg   LdMachoSeg
-	sym   LdMachoSymtab
-	dsym  LdMachoDysymtab
+	seg   ldMachoSeg
+	sym   ldMachoSymtab
+	dsym  ldMachoDysymtab
 }
 
-type LdMachoSeg struct {
+type ldMachoSeg struct {
 	name     string
 	vmaddr   uint64
 	vmsize   uint64
@@ -74,10 +77,10 @@ type LdMachoSeg struct {
 	initprot uint32
 	nsect    uint32
 	flags    uint32
-	sect     []LdMachoSect
+	sect     []ldMachoSect
 }
 
-type LdMachoSect struct {
+type ldMachoSect struct {
 	name    string
 	segname string
 	addr    uint64
@@ -89,11 +92,11 @@ type LdMachoSect struct {
 	flags   uint32
 	res1    uint32
 	res2    uint32
-	sym     *LSym
-	rel     []LdMachoRel
+	sym     *Symbol
+	rel     []ldMachoRel
 }
 
-type LdMachoRel struct {
+type ldMachoRel struct {
 	addr      uint32
 	symnum    uint32
 	pcrel     uint8
@@ -104,26 +107,26 @@ type LdMachoRel struct {
 	value     uint32
 }
 
-type LdMachoSymtab struct {
+type ldMachoSymtab struct {
 	symoff  uint32
 	nsym    uint32
 	stroff  uint32
 	strsize uint32
 	str     []byte
-	sym     []LdMachoSym
+	sym     []ldMachoSym
 }
 
-type LdMachoSym struct {
+type ldMachoSym struct {
 	name    string
 	type_   uint8
 	sectnum uint8
 	desc    uint16
 	kind    int8
 	value   uint64
-	sym     *LSym
+	sym     *Symbol
 }
 
-type LdMachoDysymtab struct {
+type ldMachoDysymtab struct {
 	ilocalsym      uint32
 	nlocalsym      uint32
 	iextdefsym     uint32
@@ -172,7 +175,7 @@ const (
 	LdMachoFilePreload    = 5
 )
 
-func unpackcmd(p []byte, m *LdMachoObj, c *LdMachoCmd, type_ uint, sz uint) int {
+func unpackcmd(p []byte, m *ldMachoObj, c *ldMachoCmd, type_ uint, sz uint) int {
 	e4 := m.e.Uint32
 	e8 := m.e.Uint64
 
@@ -195,12 +198,12 @@ func unpackcmd(p []byte, m *LdMachoObj, c *LdMachoCmd, type_ uint, sz uint) int 
 		c.seg.initprot = e4(p[44:])
 		c.seg.nsect = e4(p[48:])
 		c.seg.flags = e4(p[52:])
-		c.seg.sect = make([]LdMachoSect, c.seg.nsect)
+		c.seg.sect = make([]ldMachoSect, c.seg.nsect)
 		if uint32(sz) < 56+c.seg.nsect*68 {
 			return -1
 		}
 		p = p[56:]
-		var s *LdMachoSect
+		var s *ldMachoSect
 		for i := 0; uint32(i) < c.seg.nsect; i++ {
 			s = &c.seg.sect[i]
 			s.name = cstring(p[0:16])
@@ -230,12 +233,12 @@ func unpackcmd(p []byte, m *LdMachoObj, c *LdMachoCmd, type_ uint, sz uint) int 
 		c.seg.initprot = e4(p[60:])
 		c.seg.nsect = e4(p[64:])
 		c.seg.flags = e4(p[68:])
-		c.seg.sect = make([]LdMachoSect, c.seg.nsect)
+		c.seg.sect = make([]ldMachoSect, c.seg.nsect)
 		if uint32(sz) < 72+c.seg.nsect*80 {
 			return -1
 		}
 		p = p[72:]
-		var s *LdMachoSect
+		var s *ldMachoSect
 		for i := 0; uint32(i) < c.seg.nsect; i++ {
 			s = &c.seg.sect[i]
 			s.name = cstring(p[0:16])
@@ -290,18 +293,21 @@ func unpackcmd(p []byte, m *LdMachoObj, c *LdMachoCmd, type_ uint, sz uint) int 
 	return 0
 }
 
-func macholoadrel(m *LdMachoObj, sect *LdMachoSect) int {
+func macholoadrel(m *ldMachoObj, sect *ldMachoSect) int {
 	if sect.rel != nil || sect.nreloc == 0 {
 		return 0
 	}
-	rel := make([]LdMachoRel, sect.nreloc)
+	rel := make([]ldMachoRel, sect.nreloc)
 	n := int(sect.nreloc * 8)
 	buf := make([]byte, n)
-	if obj.Bseek(m.f, m.base+int64(sect.reloff), 0) < 0 || obj.Bread(m.f, buf) != n {
+	if m.f.Seek(m.base+int64(sect.reloff), 0) < 0 {
+		return -1
+	}
+	if _, err := io.ReadFull(m.f, buf); err != nil {
 		return -1
 	}
 	var p []byte
-	var r *LdMachoRel
+	var r *ldMachoRel
 	var v uint32
 	for i := 0; uint32(i) < sect.nreloc; i++ {
 		r = &rel[i]
@@ -339,11 +345,14 @@ func macholoadrel(m *LdMachoObj, sect *LdMachoSect) int {
 	return 0
 }
 
-func macholoaddsym(m *LdMachoObj, d *LdMachoDysymtab) int {
+func macholoaddsym(m *ldMachoObj, d *ldMachoDysymtab) int {
 	n := int(d.nindirectsyms)
 
 	p := make([]byte, n*4)
-	if obj.Bseek(m.f, m.base+int64(d.indirectsymoff), 0) < 0 || obj.Bread(m.f, p) != len(p) {
+	if m.f.Seek(m.base+int64(d.indirectsymoff), 0) < 0 {
+		return -1
+	}
+	if _, err := io.ReadFull(m.f, p); err != nil {
 		return -1
 	}
 
@@ -354,13 +363,16 @@ func macholoaddsym(m *LdMachoObj, d *LdMachoDysymtab) int {
 	return 0
 }
 
-func macholoadsym(m *LdMachoObj, symtab *LdMachoSymtab) int {
+func macholoadsym(m *ldMachoObj, symtab *ldMachoSymtab) int {
 	if symtab.sym != nil {
 		return 0
 	}
 
 	strbuf := make([]byte, symtab.strsize)
-	if obj.Bseek(m.f, m.base+int64(symtab.stroff), 0) < 0 || obj.Bread(m.f, strbuf) != len(strbuf) {
+	if m.f.Seek(m.base+int64(symtab.stroff), 0) < 0 {
+		return -1
+	}
+	if _, err := io.ReadFull(m.f, strbuf); err != nil {
 		return -1
 	}
 
@@ -370,12 +382,15 @@ func macholoadsym(m *LdMachoObj, symtab *LdMachoSymtab) int {
 	}
 	n := int(symtab.nsym * uint32(symsize))
 	symbuf := make([]byte, n)
-	if obj.Bseek(m.f, m.base+int64(symtab.symoff), 0) < 0 || obj.Bread(m.f, symbuf) != len(symbuf) {
+	if m.f.Seek(m.base+int64(symtab.symoff), 0) < 0 {
 		return -1
 	}
-	sym := make([]LdMachoSym, symtab.nsym)
+	if _, err := io.ReadFull(m.f, symbuf); err != nil {
+		return -1
+	}
+	sym := make([]ldMachoSym, symtab.nsym)
 	p := symbuf
-	var s *LdMachoSym
+	var s *ldMachoSym
 	var v uint32
 	for i := 0; uint32(i) < symtab.nsym; i++ {
 		s = &sym[i]
@@ -384,8 +399,8 @@ func macholoadsym(m *LdMachoObj, symtab *LdMachoSymtab) int {
 			return -1
 		}
 		s.name = cstring(strbuf[v:])
-		s.type_ = uint8(p[4])
-		s.sectnum = uint8(p[5])
+		s.type_ = p[4]
+		s.sectnum = p[5]
 		s.desc = m.e.Uint16(p[6:])
 		if m.is64 {
 			s.value = m.e.Uint64(p[8:])
@@ -400,7 +415,7 @@ func macholoadsym(m *LdMachoObj, symtab *LdMachoSymtab) int {
 	return 0
 }
 
-func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
+func ldmacho(ctxt *Link, f *bio.Reader, pkg string, length int64, pn string) {
 	var err error
 	var j int
 	var is64 bool
@@ -413,25 +428,25 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 	var ty uint32
 	var sz uint32
 	var off uint32
-	var m *LdMachoObj
+	var m *ldMachoObj
 	var e binary.ByteOrder
-	var sect *LdMachoSect
-	var rel *LdMachoRel
+	var sect *ldMachoSect
+	var rel *ldMachoRel
 	var rpi int
-	var s *LSym
-	var s1 *LSym
-	var outer *LSym
-	var c *LdMachoCmd
-	var symtab *LdMachoSymtab
-	var dsymtab *LdMachoDysymtab
-	var sym *LdMachoSym
+	var s *Symbol
+	var s1 *Symbol
+	var outer *Symbol
+	var c *ldMachoCmd
+	var symtab *ldMachoSymtab
+	var dsymtab *ldMachoDysymtab
+	var sym *ldMachoSym
 	var r []Reloc
 	var rp *Reloc
 	var name string
 
-	Ctxt.Version++
-	base := obj.Boffset(f)
-	if obj.Bread(f, hdr[:]) != len(hdr) {
+	localSymVersion := ctxt.Syms.IncVersion()
+	base := f.Offset()
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		goto bad
 	}
 
@@ -445,54 +460,53 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 	}
 
 	is64 = e.Uint32(hdr[:]) == 0xFEEDFACF
-	ncmd = e.Uint32([]byte(hdr[4*4:]))
-	cmdsz = e.Uint32([]byte(hdr[5*4:]))
+	ncmd = e.Uint32(hdr[4*4:])
+	cmdsz = e.Uint32(hdr[5*4:])
 	if ncmd > 0x10000 || cmdsz >= 0x01000000 {
 		err = fmt.Errorf("implausible mach-o header ncmd=%d cmdsz=%d", ncmd, cmdsz)
 		goto bad
 	}
 
 	if is64 {
-		var tmp [4]uint8
-		obj.Bread(f, tmp[:4]) // skip reserved word in header
+		f.Seek(4, 1) // skip reserved word in header
 	}
 
-	m = new(LdMachoObj)
+	m = new(ldMachoObj)
 
 	m.f = f
 	m.e = e
-	m.cputype = uint(e.Uint32([]byte(hdr[1*4:])))
-	m.subcputype = uint(e.Uint32([]byte(hdr[2*4:])))
-	m.filetype = e.Uint32([]byte(hdr[3*4:]))
+	m.cputype = uint(e.Uint32(hdr[1*4:]))
+	m.subcputype = uint(e.Uint32(hdr[2*4:]))
+	m.filetype = e.Uint32(hdr[3*4:])
 	m.ncmd = uint(ncmd)
-	m.flags = e.Uint32([]byte(hdr[6*4:]))
+	m.flags = e.Uint32(hdr[6*4:])
 	m.is64 = is64
 	m.base = base
 	m.length = length
 	m.name = pn
 
-	switch Thearch.Thechar {
+	switch SysArch.Family {
 	default:
-		Diag("%s: mach-o %s unimplemented", pn, Thestring)
+		Errorf(nil, "%s: mach-o %s unimplemented", pn, SysArch.Name)
 		return
 
-	case '6':
+	case sys.AMD64:
 		if e != binary.LittleEndian || m.cputype != LdMachoCpuAmd64 {
-			Diag("%s: mach-o object but not amd64", pn)
+			Errorf(nil, "%s: mach-o object but not amd64", pn)
 			return
 		}
 
-	case '8':
+	case sys.I386:
 		if e != binary.LittleEndian || m.cputype != LdMachoCpu386 {
-			Diag("%s: mach-o object but not 386", pn)
+			Errorf(nil, "%s: mach-o object but not 386", pn)
 			return
 		}
 	}
 
-	m.cmd = make([]LdMachoCmd, ncmd)
+	m.cmd = make([]ldMachoCmd, ncmd)
 	off = uint32(len(hdr))
 	cmdp = make([]byte, cmdsz)
-	if obj.Bread(f, cmdp) != len(cmdp) {
+	if _, err2 := io.ReadFull(f, cmdp); err2 != nil {
 		err = fmt.Errorf("reading cmds: %v", err)
 		goto bad
 	}
@@ -555,7 +569,11 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 	}
 
 	dat = make([]byte, c.seg.filesz)
-	if obj.Bseek(f, m.base+int64(c.seg.fileoff), 0) < 0 || obj.Bread(f, dat) != len(dat) {
+	if f.Seek(m.base+int64(c.seg.fileoff), 0) < 0 {
+		err = fmt.Errorf("cannot load object data: %v", err)
+		goto bad
+	}
+	if _, err2 := io.ReadFull(f, dat); err2 != nil {
 		err = fmt.Errorf("cannot load object data: %v", err)
 		goto bad
 	}
@@ -569,7 +587,7 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 			continue
 		}
 		name = fmt.Sprintf("%s(%s/%s)", pkg, sect.segname, sect.name)
-		s = Linklookup(Ctxt, name, Ctxt.Version)
+		s = ctxt.Syms.Lookup(name, localSymVersion)
 		if s.Type != 0 {
 			err = fmt.Errorf("duplicate %s/%s", sect.segname, sect.name)
 			goto bad
@@ -584,16 +602,16 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 
 		if sect.segname == "__TEXT" {
 			if sect.name == "__text" {
-				s.Type = obj.STEXT
+				s.Type = STEXT
 			} else {
-				s.Type = obj.SRODATA
+				s.Type = SRODATA
 			}
 		} else {
 			if sect.name == "__bss" {
-				s.Type = obj.SNOPTRBSS
+				s.Type = SNOPTRBSS
 				s.P = s.P[:0]
 			} else {
-				s.Type = obj.SNOPTRDATA
+				s.Type = SNOPTRDATA
 			}
 		}
 
@@ -616,11 +634,11 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 		}
 		v := 0
 		if sym.type_&N_EXT == 0 {
-			v = Ctxt.Version
+			v = localSymVersion
 		}
-		s = Linklookup(Ctxt, name, v)
+		s = ctxt.Syms.Lookup(name, v)
 		if sym.type_&N_EXT == 0 {
-			s.Dupok = 1
+			s.Attr |= AttrDuplicateOK
 		}
 		sym.sym = s
 		if sym.sectnum == 0 { // undefined
@@ -639,25 +657,25 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 		}
 
 		if s.Outer != nil {
-			if s.Dupok != 0 {
+			if s.Attr.DuplicateOK() {
 				continue
 			}
 			Exitf("%s: duplicate symbol reference: %s in both %s and %s", pn, s.Name, s.Outer.Name, sect.sym.Name)
 		}
 
-		s.Type = outer.Type | obj.SSUB
+		s.Type = outer.Type | SSUB
 		s.Sub = outer.Sub
 		outer.Sub = s
 		s.Outer = outer
 		s.Value = int64(sym.value - sect.addr)
-		if s.Cgoexport&CgoExportDynamic == 0 {
+		if !s.Attr.CgoExportDynamic() {
 			s.Dynimplib = "" // satisfy dynimport
 		}
-		if outer.Type == obj.STEXT {
-			if s.External != 0 && s.Dupok == 0 {
-				Diag("%s: duplicate definition of %s", pn, s.Name)
+		if outer.Type == STEXT {
+			if s.Attr.External() && !s.Attr.DuplicateOK() {
+				Errorf(s, "%s: duplicate symbol definition", pn)
 			}
-			s.External = 1
+			s.Attr |= AttrExternal
 		}
 
 		sym.sym = s
@@ -672,7 +690,7 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 			continue
 		}
 		if s.Sub != nil {
-			s.Sub = listsort(s.Sub, valuecmp, listsubp)
+			s.Sub = listsort(s.Sub)
 
 			// assign sizes, now that we know symbols in sorted order.
 			for s1 = s.Sub; s1 != nil; s1 = s1.Sub {
@@ -684,24 +702,18 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 			}
 		}
 
-		if s.Type == obj.STEXT {
-			if s.Onlist != 0 {
+		if s.Type == STEXT {
+			if s.Attr.OnList() {
 				log.Fatalf("symbol %s listed multiple times", s.Name)
 			}
-			s.Onlist = 1
-			if Ctxt.Etextp != nil {
-				Ctxt.Etextp.Next = s
-			} else {
-				Ctxt.Textp = s
-			}
-			Ctxt.Etextp = s
+			s.Attr |= AttrOnList
+			ctxt.Textp = append(ctxt.Textp, s)
 			for s1 = s.Sub; s1 != nil; s1 = s1.Sub {
-				if s1.Onlist != 0 {
+				if s1.Attr.OnList() {
 					log.Fatalf("symbol %s listed multiple times", s1.Name)
 				}
-				s1.Onlist = 1
-				Ctxt.Etextp.Next = s1
-				Ctxt.Etextp = s1
+				s1.Attr |= AttrOnList
+				ctxt.Textp = append(ctxt.Textp, s1)
 			}
 		}
 	}
@@ -724,10 +736,9 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 			rp = &r[rpi]
 			rel = &sect.rel[j]
 			if rel.scattered != 0 {
-				if Thearch.Thechar != '8' {
+				if SysArch.Family != sys.I386 {
 					// mach-o only uses scattered relocation on 32-bit platforms
-					Diag("unexpected scattered relocation")
-
+					Errorf(s, "unexpected scattered relocation")
 					continue
 				}
 
@@ -761,13 +772,13 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 				// want to make it pc-relative aka relative to rp->off+4
 				// but the scatter asks for relative to off = sect->rel[j+1].value - sect->addr.
 				// adjust rp->add accordingly.
-				rp.Type = obj.R_PCREL
+				rp.Type = objabi.R_PCREL
 
 				rp.Add += int64(uint64(int64(rp.Off)+4) - (uint64(sect.rel[j+1].value) - sect.addr))
 
 				// now consider the desired symbol.
 				// find the section where it lives.
-				var ks *LdMachoSect
+				var ks *ldMachoSect
 				for k := 0; uint32(k) < c.seg.nsect; k++ {
 					ks = &c.seg.sect[k]
 					if ks.addr <= uint64(rel.value) && uint64(rel.value) < ks.addr+ks.size {
@@ -817,11 +828,11 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 			}
 
 			rp.Siz = rel.length
-			rp.Type = 512 + (int32(rel.type_) << 1) + int32(rel.pcrel)
+			rp.Type = 512 + (objabi.RelocType(rel.type_) << 1) + objabi.RelocType(rel.pcrel)
 			rp.Off = int32(rel.addr)
 
 			// Handle X86_64_RELOC_SIGNED referencing a section (rel->extrn == 0).
-			if Thearch.Thechar == '6' && rel.extrn == 0 && rel.type_ == 1 {
+			if SysArch.Family == sys.AMD64 && rel.extrn == 0 && rel.type_ == MACHO_X86_64_RELOC_SIGNED {
 				// Calculate the addend as the offset into the section.
 				//
 				// The rip-relative offset stored in the object file is encoded
@@ -844,10 +855,17 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 				rp.Add = int64(int32(e.Uint32(s.P[rp.Off:])))
 			}
 
+			// An unsigned internal relocation has a value offset
+			// by the section address.
+			if SysArch.Family == sys.AMD64 && rel.extrn == 0 && rel.type_ == MACHO_X86_64_RELOC_UNSIGNED {
+				secaddr = c.seg.sect[rel.symnum-1].addr
+				rp.Add -= int64(secaddr)
+			}
+
 			// For i386 Mach-O PC-relative, the addend is written such that
-			// it *is* the PC being subtracted.  Use that to make
+			// it *is* the PC being subtracted. Use that to make
 			// it match our version of PC-relative.
-			if rel.pcrel != 0 && Thearch.Thechar == '8' {
+			if rel.pcrel != 0 && SysArch.Family == sys.I386 {
 				rp.Add += int64(rp.Off) + int64(rp.Siz)
 			}
 			if rel.extrn == 0 {
@@ -866,7 +884,7 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 				// include that information in the addend.
 				// We only care about the delta from the
 				// section base.
-				if Thearch.Thechar == '8' {
+				if SysArch.Family == sys.I386 {
 					rp.Add -= int64(c.seg.sect[rel.symnum-1].addr)
 				}
 			} else {
@@ -889,5 +907,5 @@ func ldmacho(f *obj.Biobuf, pkg string, length int64, pn string) {
 	return
 
 bad:
-	Diag("%s: malformed mach-o file: %v", pn, err)
+	Errorf(nil, "%s: malformed mach-o file: %v", pn, err)
 }

@@ -10,6 +10,10 @@
 
 package main
 
+import _ "unsafe" // for go:linkname
+
+//go:linkname some_name some_name
+
 const anything = 1e9 // Just some unlikely value that means "we got here, don't care how often"
 
 func testAll() {
@@ -24,6 +28,8 @@ func testAll() {
 	testSelect2()
 	testPanic()
 	testEmptySwitches()
+	testFunctionLiteral()
+	testGoto()
 }
 
 // The indexes of the counters in testPanic are known to main.go
@@ -215,4 +221,75 @@ func testEmptySwitches() {
 	}()
 	<-c
 	check(LINE, 1)
+}
+
+func testFunctionLiteral() {
+	a := func(f func()) error {
+		f()
+		f()
+		return nil
+	}
+
+	b := func(f func()) bool {
+		f()
+		f()
+		return true
+	}
+
+	check(LINE, 1)
+	a(func() {
+		check(LINE, 2)
+	})
+
+	if err := a(func() {
+		check(LINE, 2)
+	}); err != nil {
+	}
+
+	switch b(func() {
+		check(LINE, 2)
+	}) {
+	}
+
+	x := 2
+	switch x {
+	case func() int { check(LINE, 1); return 1 }():
+		check(LINE, 0)
+		panic("2=1")
+	case func() int { check(LINE, 1); return 2 }():
+		check(LINE, 1)
+	case func() int { check(LINE, 0); return 3 }():
+		check(LINE, 0)
+		panic("2=3")
+	}
+}
+
+func testGoto() {
+	for i := 0; i < 2; i++ {
+		if i == 0 {
+			goto Label
+		}
+		check(LINE, 1)
+	Label:
+		check(LINE, 2)
+	}
+	// Now test that we don't inject empty statements
+	// between a label and a loop.
+loop:
+	for {
+		check(LINE, 1)
+		break loop
+	}
+}
+
+// This comment shouldn't appear in generated go code.
+func haha() {
+	// Needed for cover to add counter increment here.
+	_ = 42
+}
+
+// Some someFunction.
+//
+//go:nosplit
+func someFunction() {
 }

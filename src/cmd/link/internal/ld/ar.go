@@ -1,5 +1,5 @@
 // Inferno utils/include/ar.h
-// http://code.google.com/p/inferno-os/source/browse/utils/include/ar.h
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/include/ar.h
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -31,9 +31,11 @@
 package ld
 
 import (
-	"cmd/internal/obj"
+	"cmd/internal/bio"
+	"cmd/internal/objabi"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -57,31 +59,35 @@ type ArHdr struct {
 }
 
 // hostArchive reads an archive file holding host objects and links in
-// required objects.  The general format is the same as a Go archive
+// required objects. The general format is the same as a Go archive
 // file, but it has an armap listing symbols and the objects that
-// define them.  This is used for the compiler support library
+// define them. This is used for the compiler support library
 // libgcc.a.
-func hostArchive(name string) {
-	f, err := obj.Bopenr(name)
+func hostArchive(ctxt *Link, name string) {
+	f, err := bio.Open(name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// It's OK if we don't have a libgcc file at all.
-			if Debug['v'] != 0 {
-				fmt.Fprintf(&Bso, "skipping libgcc file: %v\n", err)
+			if ctxt.Debugvlog != 0 {
+				ctxt.Logf("skipping libgcc file: %v\n", err)
 			}
 			return
 		}
 		Exitf("cannot open file %s: %v", name, err)
 	}
-	defer obj.Bterm(f)
+	defer f.Close()
 
-	magbuf := make([]byte, len(ARMAG))
-	if obj.Bread(f, magbuf) != len(magbuf) {
+	var magbuf [len(ARMAG)]byte
+	if _, err := io.ReadFull(f, magbuf[:]); err != nil {
 		Exitf("file %s too short", name)
 	}
 
+	if string(magbuf[:]) != ARMAG {
+		Exitf("%s is not an archive file", name)
+	}
+
 	var arhdr ArHdr
-	l := nextar(f, obj.Boffset(f), &arhdr)
+	l := nextar(f, f.Offset(), &arhdr)
 	if l <= 0 {
 		Exitf("%s missing armap", name)
 	}
@@ -97,9 +103,9 @@ func hostArchive(name string) {
 	any := true
 	for any {
 		var load []uint64
-		for s := Ctxt.Allsym; s != nil; s = s.Allsym {
+		for _, s := range ctxt.Syms.Allsym {
 			for _, r := range s.R {
-				if r.Sym != nil && r.Sym.Type&obj.SMASK == obj.SXREF {
+				if r.Sym != nil && r.Sym.Type&SMASK == SXREF {
 					if off := armap[r.Sym.Name]; off != 0 && !loaded[off] {
 						load = append(load, off)
 						loaded[off] = true
@@ -116,9 +122,10 @@ func hostArchive(name string) {
 			pname := fmt.Sprintf("%s(%s)", name, arhdr.name)
 			l = atolwhex(arhdr.size)
 
-			h := ldobj(f, "libgcc", l, pname, name, ArchiveObj)
-			obj.Bseek(f, h.off, 0)
-			h.ld(f, h.pkg, h.length, h.pn)
+			libgcc := Library{Pkg: "libgcc"}
+			h := ldobj(ctxt, f, &libgcc, l, pname, name, ArchiveObj)
+			f.Seek(h.off, 0)
+			h.ld(ctxt, f, h.pkg, h.length, h.pn)
 		}
 
 		any = len(load) > 0
@@ -130,16 +137,15 @@ func hostArchive(name string) {
 type archiveMap map[string]uint64
 
 // readArmap reads the archive symbol map.
-func readArmap(filename string, f *obj.Biobuf, arhdr ArHdr) archiveMap {
+func readArmap(filename string, f *bio.Reader, arhdr ArHdr) archiveMap {
 	is64 := arhdr.name == "/SYM64/"
 	wordSize := 4
 	if is64 {
 		wordSize = 8
 	}
 
-	l := atolwhex(arhdr.size)
-	contents := make([]byte, l)
-	if obj.Bread(f, contents) != int(l) {
+	contents := make([]byte, atolwhex(arhdr.size))
+	if _, err := io.ReadFull(f, contents); err != nil {
 		Exitf("short read from %s", filename)
 	}
 
@@ -164,7 +170,7 @@ func readArmap(filename string, f *obj.Biobuf, arhdr ArHdr) archiveMap {
 
 		// For Mach-O and PE/386 files we strip a leading
 		// underscore from the symbol name.
-		if goos == "darwin" || (goos == "windows" && goarch == "386") {
+		if objabi.GOOS == "darwin" || (objabi.GOOS == "windows" && objabi.GOARCH == "386") {
 			if name[0] == '_' && len(name) > 1 {
 				name = name[1:]
 			}

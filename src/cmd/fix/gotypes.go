@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -14,10 +14,10 @@ func init() {
 }
 
 var gotypesFix = fix{
-	"gotypes",
-	"2015-07-16",
-	gotypes,
-	`Change imports of golang.org/x/tools/go/{exact,types} to go/{constant,types}`,
+	name: "gotypes",
+	date: "2015-07-16",
+	f:    gotypes,
+	desc: `Change imports of golang.org/x/tools/go/{exact,types} to go/{constant,types}`,
 }
 
 func gotypes(f *ast.File) bool {

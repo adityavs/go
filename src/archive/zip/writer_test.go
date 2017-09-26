@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -84,6 +85,111 @@ func TestWriter(t *testing.T) {
 	}
 	for i, wt := range writeTests {
 		testReadFile(t, r.File[i], &wt)
+	}
+}
+
+// TestWriterComment is test for EOCD comment read/write.
+func TestWriterComment(t *testing.T) {
+	var tests = []struct {
+		comment string
+		ok      bool
+	}{
+		{"hi, hello", true},
+		{"hi, こんにちわ", true},
+		{strings.Repeat("a", uint16max), true},
+		{strings.Repeat("a", uint16max+1), false},
+	}
+
+	for _, test := range tests {
+		// write a zip file
+		buf := new(bytes.Buffer)
+		w := NewWriter(buf)
+		w.Comment = test.comment
+
+		if err := w.Close(); test.ok == (err != nil) {
+			t.Fatal(err)
+		}
+
+		if w.closed != test.ok {
+			t.Fatalf("Writer.closed: got %v, want %v", w.closed, test.ok)
+		}
+
+		// skip read test in failure cases
+		if !test.ok {
+			continue
+		}
+
+		// read it back
+		r, err := NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Comment != test.comment {
+			t.Fatalf("Reader.Comment: got %v, want %v", r.Comment, test.comment)
+		}
+	}
+}
+
+func TestWriterUTF8(t *testing.T) {
+	var utf8Tests = []struct {
+		name    string
+		comment string
+		expect  uint16
+	}{
+		{
+			name:    "hi, hello",
+			comment: "in the world",
+			expect:  0x8,
+		},
+		{
+			name:    "hi, こんにちわ",
+			comment: "in the world",
+			expect:  0x808,
+		},
+		{
+			name:    "hi, hello",
+			comment: "in the 世界",
+			expect:  0x808,
+		},
+		{
+			name:    "hi, こんにちわ",
+			comment: "in the 世界",
+			expect:  0x808,
+		},
+	}
+
+	// write a zip file
+	buf := new(bytes.Buffer)
+	w := NewWriter(buf)
+
+	for _, test := range utf8Tests {
+		h := &FileHeader{
+			Name:    test.name,
+			Comment: test.comment,
+			Method:  Deflate,
+		}
+		w, err := w.CreateHeader(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write([]byte{})
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// read it back
+	r, err := NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, test := range utf8Tests {
+		got := r.File[i].Flags
+		t.Logf("name %v, comment %v", test.name, test.comment)
+		if got != test.expect {
+			t.Fatalf("Flags: got %v, want %v", got, test.expect)
+		}
 	}
 }
 
@@ -181,12 +287,11 @@ func testReadFile(t *testing.T, f *File, wt *WriteTest) {
 }
 
 func BenchmarkCompressedZipGarbage(b *testing.B) {
-	b.ReportAllocs()
-	var buf bytes.Buffer
 	bigBuf := bytes.Repeat([]byte("a"), 1<<20)
-	for i := 0; i < b.N; i++ {
+
+	runOnce := func(buf *bytes.Buffer) {
 		buf.Reset()
-		zw := NewWriter(&buf)
+		zw := NewWriter(buf)
 		for j := 0; j < 3; j++ {
 			w, _ := zw.CreateHeader(&FileHeader{
 				Name:   "foo",
@@ -196,4 +301,18 @@ func BenchmarkCompressedZipGarbage(b *testing.B) {
 		}
 		zw.Close()
 	}
+
+	b.ReportAllocs()
+	// Run once and then reset the timer.
+	// This effectively discards the very large initial flate setup cost,
+	// as well as the initialization of bigBuf.
+	runOnce(&bytes.Buffer{})
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		var buf bytes.Buffer
+		for pb.Next() {
+			runOnce(&buf)
+		}
+	})
 }

@@ -1,5 +1,5 @@
 // Inferno utils/8l/obj.c
-// http://code.google.com/p/inferno-os/source/browse/utils/8l/obj.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/8l/obj.c
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -31,32 +31,20 @@
 package x86
 
 import (
-	"cmd/internal/obj"
+	"cmd/internal/objabi"
+	"cmd/internal/sys"
 	"cmd/link/internal/ld"
 	"fmt"
-	"log"
 )
 
-// Reading object files.
+func Init() {
+	ld.SysArch = sys.Arch386
 
-func Main() {
-	linkarchinit()
-	ld.Ldmain()
-}
-
-func linkarchinit() {
-	ld.Thestring = "386"
-	ld.Thelinkarch = &ld.Link386
-
-	ld.Thearch.Thechar = thechar
-	ld.Thearch.Ptrsize = ld.Thelinkarch.Ptrsize
-	ld.Thearch.Intsize = ld.Thelinkarch.Ptrsize
-	ld.Thearch.Regsize = ld.Thelinkarch.Regsize
-	ld.Thearch.Funcalign = FuncAlign
-	ld.Thearch.Maxalign = MaxAlign
-	ld.Thearch.Minlc = MINLC
-	ld.Thearch.Dwarfregsp = DWARFREGSP
-	ld.Thearch.Dwarfreglr = DWARFREGLR
+	ld.Thearch.Funcalign = funcAlign
+	ld.Thearch.Maxalign = maxAlign
+	ld.Thearch.Minalign = minAlign
+	ld.Thearch.Dwarfregsp = dwarfRegSP
+	ld.Thearch.Dwarfreglr = dwarfRegLR
 
 	ld.Thearch.Adddynrel = adddynrel
 	ld.Thearch.Archinit = archinit
@@ -71,6 +59,9 @@ func linkarchinit() {
 	ld.Thearch.Lput = ld.Lputl
 	ld.Thearch.Wput = ld.Wputl
 	ld.Thearch.Vput = ld.Vputl
+	ld.Thearch.Append16 = ld.Append16l
+	ld.Thearch.Append32 = ld.Append32l
+	ld.Thearch.Append64 = ld.Append64l
 
 	ld.Thearch.Linuxdynld = "/lib/ld-linux.so.2"
 	ld.Thearch.Freebsddynld = "/usr/libexec/ld-elf.so.1"
@@ -79,116 +70,75 @@ func linkarchinit() {
 	ld.Thearch.Solarisdynld = "/lib/ld.so.1"
 }
 
-func archinit() {
-	// getgoextlinkenabled is based on GO_EXTLINK_ENABLED when
-	// Go was built; see ../../make.bash.
-	if ld.Linkmode == ld.LinkAuto && obj.Getgoextlinkenabled() == "0" {
-		ld.Linkmode = ld.LinkInternal
-	}
-
-	if ld.Buildmode == ld.BuildmodeCShared || ld.Buildmode == ld.BuildmodePIE || ld.DynlinkingGo() {
-		ld.Linkmode = ld.LinkExternal
-		got := ld.Linklookup(ld.Ctxt, "_GLOBAL_OFFSET_TABLE_", 0)
-		got.Type = obj.SDYNIMPORT
-		got.Reachable = true
-	}
-
-	switch ld.HEADTYPE {
+func archinit(ctxt *ld.Link) {
+	switch ld.Headtype {
 	default:
-		if ld.Linkmode == ld.LinkAuto {
-			ld.Linkmode = ld.LinkInternal
-		}
-		if ld.Linkmode == ld.LinkExternal && obj.Getgoextlinkenabled() != "1" {
-			log.Fatalf("cannot use -linkmode=external with -H %s", ld.Headstr(int(ld.HEADTYPE)))
-		}
+		ld.Exitf("unknown -H option: %v", ld.Headtype)
 
-	case obj.Hdarwin,
-		obj.Hfreebsd,
-		obj.Hlinux,
-		obj.Hnetbsd,
-		obj.Hopenbsd,
-		obj.Hwindows:
-		break
-	}
-
-	switch ld.HEADTYPE {
-	default:
-		ld.Exitf("unknown -H option: %v", ld.HEADTYPE)
-
-	case obj.Hplan9: /* plan 9 */
+	case objabi.Hplan9: /* plan 9 */
 		ld.HEADR = 32
 
-		if ld.INITTEXT == -1 {
-			ld.INITTEXT = 4096 + 32
+		if *ld.FlagTextAddr == -1 {
+			*ld.FlagTextAddr = 4096 + int64(ld.HEADR)
 		}
-		if ld.INITDAT == -1 {
-			ld.INITDAT = 0
+		if *ld.FlagDataAddr == -1 {
+			*ld.FlagDataAddr = 0
 		}
-		if ld.INITRND == -1 {
-			ld.INITRND = 4096
+		if *ld.FlagRound == -1 {
+			*ld.FlagRound = 4096
 		}
 
-	case obj.Hdarwin: /* apple MACH */
+	case objabi.Hdarwin: /* apple MACH */
 		ld.Machoinit()
 
 		ld.HEADR = ld.INITIAL_MACHO_HEADR
-		if ld.INITTEXT == -1 {
-			ld.INITTEXT = 4096 + int64(ld.HEADR)
+		if *ld.FlagTextAddr == -1 {
+			*ld.FlagTextAddr = 4096 + int64(ld.HEADR)
 		}
-		if ld.INITDAT == -1 {
-			ld.INITDAT = 0
+		if *ld.FlagDataAddr == -1 {
+			*ld.FlagDataAddr = 0
 		}
-		if ld.INITRND == -1 {
-			ld.INITRND = 4096
+		if *ld.FlagRound == -1 {
+			*ld.FlagRound = 4096
 		}
 
-	case obj.Hlinux, /* elf32 executable */
-		obj.Hfreebsd,
-		obj.Hnetbsd,
-		obj.Hopenbsd:
-		ld.Elfinit()
+	case objabi.Hlinux, /* elf32 executable */
+		objabi.Hfreebsd,
+		objabi.Hnetbsd,
+		objabi.Hopenbsd:
+		ld.Elfinit(ctxt)
 
 		ld.HEADR = ld.ELFRESERVE
-		if ld.INITTEXT == -1 {
-			ld.INITTEXT = 0x08048000 + int64(ld.HEADR)
+		if *ld.FlagTextAddr == -1 {
+			*ld.FlagTextAddr = 0x08048000 + int64(ld.HEADR)
 		}
-		if ld.INITDAT == -1 {
-			ld.INITDAT = 0
+		if *ld.FlagDataAddr == -1 {
+			*ld.FlagDataAddr = 0
 		}
-		if ld.INITRND == -1 {
-			ld.INITRND = 4096
+		if *ld.FlagRound == -1 {
+			*ld.FlagRound = 4096
 		}
 
-	case obj.Hnacl:
-		ld.Elfinit()
+	case objabi.Hnacl:
+		ld.Elfinit(ctxt)
 		ld.HEADR = 0x10000
 		ld.Funcalign = 32
-		if ld.INITTEXT == -1 {
-			ld.INITTEXT = 0x20000
+		if *ld.FlagTextAddr == -1 {
+			*ld.FlagTextAddr = 0x20000
 		}
-		if ld.INITDAT == -1 {
-			ld.INITDAT = 0
+		if *ld.FlagDataAddr == -1 {
+			*ld.FlagDataAddr = 0
 		}
-		if ld.INITRND == -1 {
-			ld.INITRND = 0x10000
+		if *ld.FlagRound == -1 {
+			*ld.FlagRound = 0x10000
 		}
 
-	case obj.Hwindows: /* PE executable */
-		ld.Peinit()
-
-		ld.HEADR = ld.PEFILEHEADR
-		if ld.INITTEXT == -1 {
-			ld.INITTEXT = ld.PEBASE + int64(ld.PESECTHEADR)
-		}
-		if ld.INITDAT == -1 {
-			ld.INITDAT = 0
-		}
-		if ld.INITRND == -1 {
-			ld.INITRND = ld.PESECTALIGN
-		}
+	case objabi.Hwindows: /* PE executable */
+		// ld.HEADR, ld.FlagTextAddr, ld.FlagDataAddr and ld.FlagRound are set in ld.Peinit
+		return
 	}
 
-	if ld.INITDAT != 0 && ld.INITRND != 0 {
-		fmt.Printf("warning: -D0x%x is ignored because of -R0x%x\n", uint64(ld.INITDAT), uint32(ld.INITRND))
+	if *ld.FlagDataAddr != 0 && *ld.FlagRound != 0 {
+		fmt.Printf("warning: -D0x%x is ignored because of -R0x%x\n", uint64(*ld.FlagDataAddr), uint32(*ld.FlagRound))
 	}
 }

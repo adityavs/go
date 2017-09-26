@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/color"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -22,26 +23,49 @@ const (
 	trailerStr = "\x3b"
 )
 
-// lzwEncode returns an LZW encoding (with 2-bit literals) of n zeroes.
-func lzwEncode(n int) []byte {
+// lzwEncode returns an LZW encoding (with 2-bit literals) of in.
+func lzwEncode(in []byte) []byte {
 	b := &bytes.Buffer{}
 	w := lzw.NewWriter(b, lzw.LSB, 2)
-	w.Write(make([]byte, n))
-	w.Close()
+	if _, err := w.Write(in); err != nil {
+		panic(err)
+	}
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
 	return b.Bytes()
 }
 
 func TestDecode(t *testing.T) {
+	// extra contains superfluous bytes to inject into the GIF, either at the end
+	// of an existing data sub-block (past the LZW End of Information code) or in
+	// a separate data sub-block. The 0x02 values are arbitrary.
+	const extra = "\x02\x02\x02\x02"
+
 	testCases := []struct {
-		nPix    int  // The number of pixels in the image data.
-		extra   bool // Whether to write an extra block after the LZW-encoded data.
-		wantErr error
+		nPix int // The number of pixels in the image data.
+		// If non-zero, write this many extra bytes inside the data sub-block
+		// containing the LZW end code.
+		extraExisting int
+		// If non-zero, write an extra block of this many bytes.
+		extraSeparate int
+		wantErr       error
 	}{
-		{0, false, errNotEnough},
-		{1, false, errNotEnough},
-		{2, false, nil},
-		{2, true, errTooMuch},
-		{3, false, errTooMuch},
+		{0, 0, 0, errNotEnough},
+		{1, 0, 0, errNotEnough},
+		{2, 0, 0, nil},
+		// An extra data sub-block after the compressed section with 1 byte which we
+		// silently skip.
+		{2, 0, 1, nil},
+		// An extra data sub-block after the compressed section with 2 bytes. In
+		// this case we complain that there is too much data.
+		{2, 0, 2, errTooMuch},
+		// Too much pixel data.
+		{3, 0, 0, errTooMuch},
+		// An extra byte after LZW data, but inside the same data sub-block.
+		{2, 1, 0, nil},
+		// Two extra bytes after LZW data, but inside the same data sub-block.
+		{2, 2, 0, nil},
 	}
 	for _, tc := range testCases {
 		b := &bytes.Buffer{}
@@ -53,23 +77,36 @@ func TestDecode(t *testing.T) {
 		// byte, and 2-bit LZW literals.
 		b.WriteString("\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02")
 		if tc.nPix > 0 {
-			enc := lzwEncode(tc.nPix)
-			if len(enc) > 0xff {
-				t.Errorf("nPix=%d, extra=%t: compressed length %d is too large", tc.nPix, tc.extra, len(enc))
+			enc := lzwEncode(make([]byte, tc.nPix))
+			if len(enc)+tc.extraExisting > 0xff {
+				t.Errorf("nPix=%d, extraExisting=%d, extraSeparate=%d: compressed length %d is too large",
+					tc.nPix, tc.extraExisting, tc.extraSeparate, len(enc))
 				continue
 			}
-			b.WriteByte(byte(len(enc)))
+
+			// Write the size of the data sub-block containing the LZW data.
+			b.WriteByte(byte(len(enc) + tc.extraExisting))
+
+			// Write the LZW data.
 			b.Write(enc)
+
+			// Write extra bytes inside the same data sub-block where LZW data
+			// ended. Each arbitrarily 0x02.
+			b.WriteString(extra[:tc.extraExisting])
 		}
-		if tc.extra {
-			b.WriteString("\x01\x02") // A 1-byte payload with an 0x02 byte.
+
+		if tc.extraSeparate > 0 {
+			// Data sub-block size. This indicates how many extra bytes follow.
+			b.WriteByte(byte(tc.extraSeparate))
+			b.WriteString(extra[:tc.extraSeparate])
 		}
 		b.WriteByte(0x00) // An empty block signifies the end of the image data.
 		b.WriteString(trailerStr)
 
 		got, err := Decode(b)
 		if err != tc.wantErr {
-			t.Errorf("nPix=%d, extra=%t\ngot  %v\nwant %v", tc.nPix, tc.extra, err, tc.wantErr)
+			t.Errorf("nPix=%d, extraExisting=%d, extraSeparate=%d\ngot  %v\nwant %v",
+				tc.nPix, tc.extraExisting, tc.extraSeparate, err, tc.wantErr)
 		}
 
 		if tc.wantErr != nil {
@@ -85,7 +122,8 @@ func TestDecode(t *testing.T) {
 			},
 		}
 		if !reflect.DeepEqual(got, want) {
-			t.Errorf("nPix=%d, extra=%t\ngot  %v\nwant %v", tc.nPix, tc.extra, got, want)
+			t.Errorf("nPix=%d, extraExisting=%d, extraSeparate=%d\ngot  %v\nwant %v",
+				tc.nPix, tc.extraExisting, tc.extraSeparate, got, want)
 		}
 	}
 }
@@ -97,13 +135,13 @@ func TestTransparentIndex(t *testing.T) {
 	for transparentIndex := 0; transparentIndex < 3; transparentIndex++ {
 		if transparentIndex < 2 {
 			// Write the graphic control for the transparent index.
-			b.WriteString("\x21\xf9\x00\x01\x00\x00")
+			b.WriteString("\x21\xf9\x04\x01\x00\x00")
 			b.WriteByte(byte(transparentIndex))
 			b.WriteByte(0)
 		}
 		// Write an image with bounds 2x1, as per TestDecode.
 		b.WriteString("\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02")
-		enc := lzwEncode(2)
+		enc := lzwEncode([]byte{0x00, 0x00})
 		if len(enc) > 0xff {
 			t.Fatalf("compressed length %d is too large", len(enc))
 		}
@@ -196,21 +234,13 @@ func TestNoPalette(t *testing.T) {
 	b.WriteString(headerStr[:len(headerStr)-3])
 	b.WriteString("\x00\x00\x00") // No global palette.
 
-	// Image descriptor: 2x1, no local palette.
+	// Image descriptor: 2x1, no local palette, and 2-bit LZW literals.
 	b.WriteString("\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02")
 
 	// Encode the pixels: neither is in range, because there is no palette.
-	pix := []byte{0, 3}
-	enc := &bytes.Buffer{}
-	w := lzw.NewWriter(enc, lzw.LSB, 2)
-	if _, err := w.Write(pix); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	b.WriteByte(byte(len(enc.Bytes())))
-	b.Write(enc.Bytes())
+	enc := lzwEncode([]byte{0x00, 0x03})
+	b.WriteByte(byte(len(enc)))
+	b.Write(enc)
 	b.WriteByte(0x00) // An empty block signifies the end of the image data.
 
 	b.WriteString(trailerStr)
@@ -226,21 +256,13 @@ func TestPixelOutsidePaletteRange(t *testing.T) {
 		b.WriteString(headerStr)
 		b.WriteString(paletteStr)
 
-		// Image descriptor: 2x1, no local palette.
+		// Image descriptor: 2x1, no local palette, and 2-bit LZW literals.
 		b.WriteString("\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02")
 
 		// Encode the pixels; some pvals trigger the expected error.
-		pix := []byte{pval, pval}
-		enc := &bytes.Buffer{}
-		w := lzw.NewWriter(enc, lzw.LSB, 2)
-		if _, err := w.Write(pix); err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
-		}
-		b.WriteByte(byte(len(enc.Bytes())))
-		b.Write(enc.Bytes())
+		enc := lzwEncode([]byte{pval, pval})
+		b.WriteByte(byte(len(enc)))
+		b.Write(enc)
 		b.WriteByte(0x00) // An empty block signifies the end of the image data.
 
 		b.WriteString(trailerStr)
@@ -252,6 +274,36 @@ func TestPixelOutsidePaletteRange(t *testing.T) {
 		}
 		try(t, b.Bytes(), want)
 	}
+}
+
+func TestTransparentPixelOutsidePaletteRange(t *testing.T) {
+	b := &bytes.Buffer{}
+
+	// Manufacture a GIF with a 2 color palette.
+	b.WriteString(headerStr)
+	b.WriteString(paletteStr)
+
+	// Graphic Control Extension: transparency, transparent color index = 3.
+	//
+	// This index, 3, is out of range of the global palette and there is no
+	// local palette in the subsequent image descriptor. This is an error
+	// according to the spec, but Firefox and Google Chrome seem OK with this.
+	//
+	// See golang.org/issue/15059.
+	b.WriteString("\x21\xf9\x04\x01\x00\x00\x03\x00")
+
+	// Image descriptor: 2x1, no local palette, and 2-bit LZW literals.
+	b.WriteString("\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02")
+
+	// Encode the pixels.
+	enc := lzwEncode([]byte{0x03, 0x03})
+	b.WriteByte(byte(len(enc)))
+	b.Write(enc)
+	b.WriteByte(0x00) // An empty block signifies the end of the image data.
+
+	b.WriteString(trailerStr)
+
+	try(t, b.Bytes(), "")
 }
 
 func TestLoopCount(t *testing.T) {
@@ -272,5 +324,21 @@ func TestLoopCount(t *testing.T) {
 	}
 	if img.LoopCount != img1.LoopCount {
 		t.Errorf("loop count mismatch: %d vs %d", img.LoopCount, img1.LoopCount)
+	}
+}
+
+func TestUnexpectedEOF(t *testing.T) {
+	for i := len(testGIF) - 1; i >= 0; i-- {
+		_, err := Decode(bytes.NewReader(testGIF[:i]))
+		if err == errNotEnough {
+			continue
+		}
+		text := ""
+		if err != nil {
+			text = err.Error()
+		}
+		if !strings.HasPrefix(text, "gif:") || !strings.HasSuffix(text, ": unexpected EOF") {
+			t.Errorf("Decode(testGIF[:%d]) = %v, want gif: ...: unexpected EOF", i, err)
+		}
 	}
 }

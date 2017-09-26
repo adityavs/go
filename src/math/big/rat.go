@@ -63,7 +63,7 @@ func (z *Rat) SetFloat64(f float64) *Rat {
 
 // quotToFloat32 returns the non-negative float32 value
 // nearest to the quotient a/b, using round-to-even in
-// halfway cases.  It does not mutate its arguments.
+// halfway cases. It does not mutate its arguments.
 // Preconditions: b is non-zero; a and b have no common factors.
 func quotToFloat32(a, b nat) (f float32, exact bool) {
 	const (
@@ -161,7 +161,7 @@ func quotToFloat32(a, b nat) (f float32, exact bool) {
 
 // quotToFloat64 returns the non-negative float64 value
 // nearest to the quotient a/b, using round-to-even in
-// halfway cases.  It does not mutate its arguments.
+// halfway cases. It does not mutate its arguments.
 // Preconditions: b is non-zero; a and b have no common factors.
 func quotToFloat64(a, b nat) (f float64, exact bool) {
 	const (
@@ -490,6 +490,13 @@ func (z *Rat) Sub(x, y *Rat) *Rat {
 
 // Mul sets z to the product x*y and returns z.
 func (z *Rat) Mul(x, y *Rat) *Rat {
+	if x == y {
+		// a squared Rat is positive and can't be reduced
+		z.a.neg = false
+		z.a.abs = z.a.abs.sqr(x.a.abs)
+		z.b.abs = z.b.abs.sqr(x.b.abs)
+		return z
+	}
 	z.a.Mul(&x.a, &y.a)
 	z.b.abs = mulDenom(z.b.abs, x.b.abs, y.b.abs)
 	return z.norm()

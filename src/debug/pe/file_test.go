@@ -1,4 +1,4 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -6,13 +6,17 @@ package pe
 
 import (
 	"debug/dwarf"
+	"internal/testenv"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
+	"strconv"
 	"testing"
+	"text/template"
 )
 
 type fileTest struct {
@@ -102,6 +106,41 @@ var fileTests = []fileTest{
 			{".debug_frame", 0x34, 0xe000, 0x200, 0x3800, 0x0, 0x0, 0x0, 0x0, 0x42300000},
 			{".debug_loc", 0x38, 0xf000, 0x200, 0x3a00, 0x0, 0x0, 0x0, 0x0, 0x42100000},
 		},
+	},
+	{
+		file: "testdata/gcc-386-mingw-no-symbols-exec",
+		hdr:  FileHeader{0x14c, 0x8, 0x69676572, 0x0, 0x0, 0xe0, 0x30f},
+		opthdr: &OptionalHeader32{0x10b, 0x2, 0x18, 0xe00, 0x1e00, 0x200, 0x1280, 0x1000, 0x2000, 0x400000, 0x1000, 0x200, 0x4, 0x0, 0x1, 0x0, 0x4, 0x0, 0x0, 0x9000, 0x400, 0x5306, 0x3, 0x0, 0x200000, 0x1000, 0x100000, 0x1000, 0x0, 0x10,
+			[16]DataDirectory{
+				{0x0, 0x0},
+				{0x6000, 0x378},
+				{0x0, 0x0},
+				{0x0, 0x0},
+				{0x0, 0x0},
+				{0x0, 0x0},
+				{0x0, 0x0},
+				{0x0, 0x0},
+				{0x0, 0x0},
+				{0x8004, 0x18},
+				{0x0, 0x0},
+				{0x0, 0x0},
+				{0x60b8, 0x7c},
+				{0x0, 0x0},
+				{0x0, 0x0},
+				{0x0, 0x0},
+			},
+		},
+		sections: []*SectionHeader{
+			{".text", 0xc64, 0x1000, 0xe00, 0x400, 0x0, 0x0, 0x0, 0x0, 0x60500060},
+			{".data", 0x10, 0x2000, 0x200, 0x1200, 0x0, 0x0, 0x0, 0x0, 0xc0300040},
+			{".rdata", 0x134, 0x3000, 0x200, 0x1400, 0x0, 0x0, 0x0, 0x0, 0x40300040},
+			{".eh_fram", 0x3a0, 0x4000, 0x400, 0x1600, 0x0, 0x0, 0x0, 0x0, 0x40300040},
+			{".bss", 0x60, 0x5000, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xc0300080},
+			{".idata", 0x378, 0x6000, 0x400, 0x1a00, 0x0, 0x0, 0x0, 0x0, 0xc0300040},
+			{".CRT", 0x18, 0x7000, 0x200, 0x1e00, 0x0, 0x0, 0x0, 0x0, 0xc0300040},
+			{".tls", 0x20, 0x8000, 0x200, 0x2000, 0x0, 0x0, 0x0, 0x0, 0xc0300040},
+		},
+		hasNoDwarfInfo: true,
 	},
 	{
 		file: "testdata/gcc-amd64-mingw-obj",
@@ -252,28 +291,70 @@ func TestOpenFailure(t *testing.T) {
 	}
 }
 
-func TestDWARF(t *testing.T) {
+const (
+	linkNoCgo = iota
+	linkCgoDefault
+	linkCgoInternal
+	linkCgoExternal
+)
+
+func testDWARF(t *testing.T, linktype int) {
 	if runtime.GOOS != "windows" {
 		t.Skip("skipping windows only test")
 	}
+	testenv.MustHaveGoRun(t)
 
 	tmpdir, err := ioutil.TempDir("", "TestDWARF")
 	if err != nil {
-		t.Fatal("TempDir failed: ", err)
+		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpdir)
 
-	prog := `
-package main
-func main() {
-}
-`
 	src := filepath.Join(tmpdir, "a.go")
-	exe := filepath.Join(tmpdir, "a.exe")
-	err = ioutil.WriteFile(src, []byte(prog), 0644)
-	output, err := exec.Command("go", "build", "-o", exe, src).CombinedOutput()
+	file, err := os.Create(src)
 	if err != nil {
-		t.Fatalf("building test executable failed: %s %s", err, output)
+		t.Fatal(err)
+	}
+	err = template.Must(template.New("main").Parse(testprog)).Execute(file, linktype != linkNoCgo)
+	if err != nil {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	exe := filepath.Join(tmpdir, "a.exe")
+	args := []string{"build", "-o", exe}
+	switch linktype {
+	case linkNoCgo:
+	case linkCgoDefault:
+	case linkCgoInternal:
+		args = append(args, "-ldflags", "-linkmode=internal")
+	case linkCgoExternal:
+		args = append(args, "-ldflags", "-linkmode=external")
+	default:
+		t.Fatalf("invalid linktype parameter of %v", linktype)
+	}
+	args = append(args, src)
+	out, err := exec.Command(testenv.GoToolPath(t), args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("building test executable for linktype %d failed: %s %s", linktype, err, out)
+	}
+	out, err = exec.Command(exe).CombinedOutput()
+	if err != nil {
+		t.Fatalf("running test executable failed: %s %s", err, out)
+	}
+
+	matches := regexp.MustCompile("main=(.*)\n").FindStringSubmatch(string(out))
+	if len(matches) < 2 {
+		t.Fatalf("unexpected program output: %s", out)
+	}
+	wantaddr, err := strconv.ParseUint(matches[1], 0, 64)
+	if err != nil {
+		t.Fatalf("unexpected main address %q: %s", matches[1], err)
 	}
 
 	f, err := Open(exe)
@@ -281,6 +362,16 @@ func main() {
 		t.Fatal(err)
 	}
 	defer f.Close()
+
+	var foundDebugGDBScriptsSection bool
+	for _, sect := range f.Sections {
+		if sect.Name == ".debug_gdb_scripts" {
+			foundDebugGDBScriptsSection = true
+		}
+	}
+	if !foundDebugGDBScriptsSection {
+		t.Error(".debug_gdb_scripts section is not found")
+	}
 
 	d, err := f.DWARF()
 	if err != nil {
@@ -298,12 +389,146 @@ func main() {
 			break
 		}
 		if e.Tag == dwarf.TagSubprogram {
-			for _, f := range e.Field {
-				if f.Attr == dwarf.AttrName && e.Val(dwarf.AttrName) == "main.main" {
+			if name, ok := e.Val(dwarf.AttrName).(string); ok && name == "main.main" {
+				if addr, ok := e.Val(dwarf.AttrLowpc).(uint64); ok && addr == wantaddr {
 					return
 				}
 			}
 		}
 	}
 	t.Fatal("main.main not found")
+}
+
+func TestBSSHasZeros(t *testing.T) {
+	testenv.MustHaveExec(t)
+
+	if runtime.GOOS != "windows" {
+		t.Skip("skipping windows only test")
+	}
+	gccpath, err := exec.LookPath("gcc")
+	if err != nil {
+		t.Skip("skipping test: gcc is missing")
+	}
+
+	tmpdir, err := ioutil.TempDir("", "TestBSSHasZeros")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpdir)
+
+	srcpath := filepath.Join(tmpdir, "a.c")
+	src := `
+#include <stdio.h>
+
+int zero = 0;
+
+int
+main(void)
+{
+	printf("%d\n", zero);
+	return 0;
+}
+`
+	err = ioutil.WriteFile(srcpath, []byte(src), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	objpath := filepath.Join(tmpdir, "a.obj")
+	cmd := exec.Command(gccpath, "-c", srcpath, "-o", objpath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to build object file: %v - %v", err, string(out))
+	}
+
+	f, err := Open(objpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var bss *Section
+	for _, sect := range f.Sections {
+		if sect.Name == ".bss" {
+			bss = sect
+			break
+		}
+	}
+	if bss == nil {
+		t.Fatal("could not find .bss section")
+	}
+	data, err := bss.Data()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		t.Fatalf("%s file .bss section cannot be empty", objpath)
+	}
+	for _, b := range data {
+		if b != 0 {
+			t.Fatalf(".bss section has non zero bytes: %v", data)
+		}
+	}
+}
+
+func TestDWARF(t *testing.T) {
+	testDWARF(t, linkNoCgo)
+}
+
+const testprog = `
+package main
+
+import "fmt"
+{{if .}}import "C"
+{{end}}
+
+func main() {
+	fmt.Printf("main=%p\n", main)
+}
+`
+
+func TestBuildingWindowsGUI(t *testing.T) {
+	testenv.MustHaveGoBuild(t)
+
+	if runtime.GOOS != "windows" {
+		t.Skip("skipping windows only test")
+	}
+	tmpdir, err := ioutil.TempDir("", "TestBuildingWindowsGUI")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpdir)
+
+	src := filepath.Join(tmpdir, "a.go")
+	err = ioutil.WriteFile(src, []byte(`package main; func main() {}`), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(tmpdir, "a.exe")
+	cmd := exec.Command(testenv.GoToolPath(t), "build", "-ldflags", "-H=windowsgui", "-o", exe, src)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("building test executable failed: %s %s", err, out)
+	}
+
+	f, err := Open(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	const _IMAGE_SUBSYSTEM_WINDOWS_GUI = 2
+
+	switch oh := f.OptionalHeader.(type) {
+	case *OptionalHeader32:
+		if oh.Subsystem != _IMAGE_SUBSYSTEM_WINDOWS_GUI {
+			t.Errorf("unexpected Subsystem value: have %d, but want %d", oh.Subsystem, _IMAGE_SUBSYSTEM_WINDOWS_GUI)
+		}
+	case *OptionalHeader64:
+		if oh.Subsystem != _IMAGE_SUBSYSTEM_WINDOWS_GUI {
+			t.Errorf("unexpected Subsystem value: have %d, but want %d", oh.Subsystem, _IMAGE_SUBSYSTEM_WINDOWS_GUI)
+		}
+	default:
+		t.Fatalf("unexpected OptionalHeader type: have %T, but want *pe.OptionalHeader32 or *pe.OptionalHeader64", oh)
+	}
 }

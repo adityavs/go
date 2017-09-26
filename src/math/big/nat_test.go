@@ -5,6 +5,7 @@
 package big
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -302,36 +303,6 @@ func TestModW(t *testing.T) {
 	}
 }
 
-func TestTrailingZeroBits(t *testing.T) {
-	// test 0 case explicitly
-	if n := trailingZeroBits(0); n != 0 {
-		t.Errorf("got trailingZeroBits(0) = %d; want 0", n)
-	}
-
-	x := Word(1)
-	for i := uint(0); i < _W; i++ {
-		n := trailingZeroBits(x)
-		if n != i {
-			t.Errorf("got trailingZeroBits(%#x) = %d; want %d", x, n, i%_W)
-		}
-		x <<= 1
-	}
-
-	// test 0 case explicitly
-	if n := nat(nil).trailingZeroBits(); n != 0 {
-		t.Errorf("got nat(nil).trailingZeroBits() = %d; want 0", n)
-	}
-
-	y := nat(nil).set(natOne)
-	for i := uint(0); i <= 3*_W; i++ {
-		n := y.trailingZeroBits()
-		if n != i {
-			t.Errorf("got 0x%s.trailingZeroBits() = %d; want %d", y.utoa(16), n, i)
-		}
-		y = y.shl(y, 1)
-	}
-}
-
 var montgomeryTests = []struct {
 	x, y, m      string
 	k0           uint64
@@ -483,6 +454,12 @@ var expNNTests = []struct {
 		"29834729834729834729347290846729561262544958723956495615629569234729836259263598127342374289365912465901365498236492183464",
 		"23537740700184054162508175125554701713153216681790245129157191391322321508055833908509185839069455749219131480588829346291",
 	},
+	{
+		"11521922904531591643048817447554701904414021819823889996244743037378330903763518501116638828335352811871131385129455853417360623007349090150042001944696604737499160174391019030572483602867266711107136838523916077674888297896995042968746762200926853379",
+		"426343618817810911523",
+		"444747819283133684179",
+		"42",
+	},
 }
 
 func TestExpNN(t *testing.T) {
@@ -503,23 +480,19 @@ func TestExpNN(t *testing.T) {
 	}
 }
 
-func ExpHelper(b *testing.B, x, y Word) {
-	var z nat
-	for i := 0; i < b.N; i++ {
-		z.expWW(x, y)
+func BenchmarkExp3Power(b *testing.B) {
+	const x = 3
+	for _, y := range []Word{
+		0x10, 0x40, 0x100, 0x400, 0x1000, 0x4000, 0x10000, 0x40000, 0x100000, 0x400000,
+	} {
+		b.Run(fmt.Sprintf("%#x", y), func(b *testing.B) {
+			var z nat
+			for i := 0; i < b.N; i++ {
+				z.expWW(x, y)
+			}
+		})
 	}
 }
-
-func BenchmarkExp3Power0x10(b *testing.B)     { ExpHelper(b, 3, 0x10) }
-func BenchmarkExp3Power0x40(b *testing.B)     { ExpHelper(b, 3, 0x40) }
-func BenchmarkExp3Power0x100(b *testing.B)    { ExpHelper(b, 3, 0x100) }
-func BenchmarkExp3Power0x400(b *testing.B)    { ExpHelper(b, 3, 0x400) }
-func BenchmarkExp3Power0x1000(b *testing.B)   { ExpHelper(b, 3, 0x1000) }
-func BenchmarkExp3Power0x4000(b *testing.B)   { ExpHelper(b, 3, 0x4000) }
-func BenchmarkExp3Power0x10000(b *testing.B)  { ExpHelper(b, 3, 0x10000) }
-func BenchmarkExp3Power0x40000(b *testing.B)  { ExpHelper(b, 3, 0x40000) }
-func BenchmarkExp3Power0x100000(b *testing.B) { ExpHelper(b, 3, 0x100000) }
-func BenchmarkExp3Power0x400000(b *testing.B) { ExpHelper(b, 3, 0x400000) }
 
 func fibo(n int) nat {
 	switch n {
@@ -644,5 +617,51 @@ func TestSticky(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func testBasicSqr(t *testing.T, x nat) {
+	got := make(nat, 2*len(x))
+	want := make(nat, 2*len(x))
+	basicSqr(got, x)
+	basicMul(want, x, x)
+	if got.cmp(want) != 0 {
+		t.Errorf("basicSqr(%v), got %v, want %v", x, got, want)
+	}
+}
+
+func TestBasicSqr(t *testing.T) {
+	for _, a := range prodNN {
+		if a.x != nil {
+			testBasicSqr(t, a.x)
+		}
+		if a.y != nil {
+			testBasicSqr(t, a.y)
+		}
+		if a.z != nil {
+			testBasicSqr(t, a.z)
+		}
+	}
+}
+
+func benchmarkNatSqr(b *testing.B, nwords int) {
+	x := rndNat(nwords)
+	var z nat
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		z.sqr(x)
+	}
+}
+
+var sqrBenchSizes = []int{1, 2, 3, 5, 8, 10, 20, 30, 50, 80, 100, 200, 300, 500, 800, 1000}
+
+func BenchmarkNatSqr(b *testing.B) {
+	for _, n := range sqrBenchSizes {
+		if isRaceBuilder && n > 1e3 {
+			continue
+		}
+		b.Run(fmt.Sprintf("%d", n), func(b *testing.B) {
+			benchmarkNatSqr(b, n)
+		})
 	}
 }

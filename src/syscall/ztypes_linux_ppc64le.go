@@ -244,10 +244,9 @@ type Msghdr struct {
 }
 
 type Cmsghdr struct {
-	Len          uint64
-	Level        int32
-	Type         int32
-	X__cmsg_data [0]uint8
+	Len   uint64
+	Level int32
+	Type  int32
 }
 
 type Inet4Pktinfo struct {
@@ -574,9 +573,10 @@ type Ustat_t struct {
 }
 
 type EpollEvent struct {
-	Events uint32
-	Fd     int32
-	Pad    int32
+	Events  uint32
+	X_padFd int32
+	Fd      int32
+	Pad     int32
 }
 
 const (

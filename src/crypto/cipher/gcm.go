@@ -10,14 +10,15 @@ import (
 )
 
 // AEAD is a cipher mode providing authenticated encryption with associated
-// data.
+// data. For a description of the methodology, see
+//	https://en.wikipedia.org/wiki/Authenticated_encryption
 type AEAD interface {
 	// NonceSize returns the size of the nonce that must be passed to Seal
 	// and Open.
 	NonceSize() int
 
 	// Overhead returns the maximum difference between the lengths of a
-	// plaintext and ciphertext.
+	// plaintext and its ciphertext.
 	Overhead() int
 
 	// Seal encrypts and authenticates plaintext, authenticates the
@@ -25,8 +26,9 @@ type AEAD interface {
 	// slice. The nonce must be NonceSize() bytes long and unique for all
 	// time, for a given key.
 	//
-	// The plaintext and dst may alias exactly or not at all.
-	Seal(dst, nonce, plaintext, data []byte) []byte
+	// The plaintext and dst may alias exactly or not at all. To reuse
+	// plaintext's storage for the encrypted output, use plaintext[:0] as dst.
+	Seal(dst, nonce, plaintext, additionalData []byte) []byte
 
 	// Open decrypts and authenticates ciphertext, authenticates the
 	// additional data and, if successful, appends the resulting plaintext
@@ -34,8 +36,12 @@ type AEAD interface {
 	// bytes long and both it and the additional data must match the
 	// value passed to Seal.
 	//
-	// The ciphertext and dst may alias exactly or not at all.
-	Open(dst, nonce, ciphertext, data []byte) ([]byte, error)
+	// The ciphertext and dst may alias exactly or not at all. To reuse
+	// ciphertext's storage for the decrypted output, use ciphertext[:0] as dst.
+	//
+	// Even if the function fails, the contents of dst, up to its capacity,
+	// may be overwritten.
+	Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error)
 }
 
 // gcmAble is an interface implemented by ciphers that have a specific optimized
@@ -68,6 +74,10 @@ type gcm struct {
 
 // NewGCM returns the given 128-bit, block cipher wrapped in Galois Counter Mode
 // with the standard nonce length.
+//
+// In general, the GHASH operation performed by this implementation of GCM is not constant-time.
+// An exception is when the underlying Block was created by aes.NewCipher
+// on systems with hardware support for AES. See the crypto/aes package documentation for details.
 func NewGCM(cipher Block) (AEAD, error) {
 	return NewGCMWithNonceSize(cipher, gcmStandardNonceSize)
 }
@@ -129,6 +139,10 @@ func (g *gcm) Seal(dst, nonce, plaintext, data []byte) []byte {
 	if len(nonce) != g.nonceSize {
 		panic("cipher: incorrect nonce length given to GCM")
 	}
+	if uint64(len(plaintext)) > ((1<<32)-2)*uint64(g.cipher.BlockSize()) {
+		panic("cipher: message too large for GCM")
+	}
+
 	ret, out := sliceForAppend(dst, len(plaintext)+gcmTagSize)
 
 	var counter, tagMask [gcmBlockSize]byte
@@ -153,6 +167,10 @@ func (g *gcm) Open(dst, nonce, ciphertext, data []byte) ([]byte, error) {
 	if len(ciphertext) < gcmTagSize {
 		return nil, errOpen
 	}
+	if uint64(len(ciphertext)) > ((1<<32)-2)*uint64(g.cipher.BlockSize())+gcmTagSize {
+		return nil, errOpen
+	}
+
 	tag := ciphertext[len(ciphertext)-gcmTagSize:]
 	ciphertext = ciphertext[:len(ciphertext)-gcmTagSize]
 
@@ -165,11 +183,19 @@ func (g *gcm) Open(dst, nonce, ciphertext, data []byte) ([]byte, error) {
 	var expectedTag [gcmTagSize]byte
 	g.auth(expectedTag[:], ciphertext, data, &tagMask)
 
+	ret, out := sliceForAppend(dst, len(ciphertext))
+
 	if subtle.ConstantTimeCompare(expectedTag[:], tag) != 1 {
+		// The AESNI code decrypts and authenticates concurrently, and
+		// so overwrites dst in the event of a tag mismatch. That
+		// behavior is mimicked here in order to be consistent across
+		// platforms.
+		for i := range out {
+			out[i] = 0
+		}
 		return nil, errOpen
 	}
 
-	ret, out := sliceForAppend(dst, len(ciphertext))
 	g.counterCrypt(out, ciphertext, &counter)
 
 	return ret, nil

@@ -1,4 +1,4 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -14,6 +14,11 @@ package json
 // before diving into the scanner itself.
 
 import "strconv"
+
+// Valid reports whether data is a valid JSON encoding.
+func Valid(data []byte) bool {
+	return checkValid(data, &scanner{}) == nil
+}
 
 // checkValid verifies that data is valid JSON-encoded data.
 // scan is passed in for use by checkValid to avoid an allocation.
@@ -132,7 +137,7 @@ const (
 
 // These values are stored in the parseState stack.
 // They give the current state of a composite value
-// being scanned.  If the parser is inside a nested value
+// being scanned. If the parser is inside a nested value
 // the parseState describes the nested state, outermost at entry 0.
 const (
 	parseObjectKey   = iota // parsing object key (before colon)

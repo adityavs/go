@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -24,10 +24,7 @@ func probeWindowsIPStack() (supportsVistaIP bool) {
 	if err != nil {
 		return true // Windows 10 and above will deprecate this API
 	}
-	if byte(v) < 6 { // major version of Windows Vista is 6
-		return false
-	}
-	return true
+	return byte(v) >= 6 // major version of Windows Vista is 6
 }
 
 // adapterAddresses returns a list of IP adapter and address
@@ -61,7 +58,7 @@ func adapterAddresses() ([]*windows.IpAdapterAddresses, error) {
 }
 
 // If the ifindex is zero, interfaceTable returns mappings of all
-// network interfaces.  Otherwise it returns a mapping of a specific
+// network interfaces. Otherwise it returns a mapping of a specific
 // interface.
 func interfaceTable(ifindex int) ([]Interface, error) {
 	aas, err := adapterAddresses()
@@ -95,9 +92,7 @@ func interfaceTable(ifindex int) ([]Interface, error) {
 			case windows.IF_TYPE_SOFTWARE_LOOPBACK:
 				ifi.Flags |= FlagLoopback | FlagMulticast
 			case windows.IF_TYPE_ATM:
-				ifi.Flags |= FlagBroadcast |
-					FlagPointToPoint |
-					FlagMulticast // assume all services available; LANE, point-to-point and point-to-multipoint
+				ifi.Flags |= FlagBroadcast | FlagPointToPoint | FlagMulticast // assume all services available; LANE, point-to-point and point-to-multipoint
 			}
 			if aa.Mtu == 0xffffffff {
 				ifi.MTU = -1
@@ -118,7 +113,7 @@ func interfaceTable(ifindex int) ([]Interface, error) {
 }
 
 // If the ifi is nil, interfaceAddrTable returns addresses for all
-// network interfaces.  Otherwise it returns addresses for a specific
+// network interfaces. Otherwise it returns addresses for a specific
 // interface.
 func interfaceAddrTable(ifi *Interface) ([]Addr, error) {
 	aas, err := adapterAddresses()
@@ -152,9 +147,7 @@ func interfaceAddrTable(ifi *Interface) ([]Addr, error) {
 					} else {
 						l = addrPrefixLen(pfx4, IP(sa.Addr[:]))
 					}
-					ifa := &IPNet{IP: make(IP, IPv4len), Mask: CIDRMask(l, 8*IPv4len)}
-					copy(ifa.IP, sa.Addr[:])
-					ifat = append(ifat, ifa)
+					ifat = append(ifat, &IPNet{IP: IPv4(sa.Addr[0], sa.Addr[1], sa.Addr[2], sa.Addr[3]), Mask: CIDRMask(l, 8*IPv4len)})
 				case *syscall.SockaddrInet6:
 					if supportsVistaIP {
 						l = int(puni.OnLinkPrefixLength)
@@ -173,9 +166,7 @@ func interfaceAddrTable(ifi *Interface) ([]Addr, error) {
 				}
 				switch sa := sa.(type) {
 				case *syscall.SockaddrInet4:
-					ifa := &IPAddr{IP: make(IP, IPv4len)}
-					copy(ifa.IP, sa.Addr[:])
-					ifat = append(ifat, ifa)
+					ifat = append(ifat, &IPAddr{IP: IPv4(sa.Addr[0], sa.Addr[1], sa.Addr[2], sa.Addr[3])})
 				case *syscall.SockaddrInet6:
 					ifa := &IPAddr{IP: make(IP, IPv6len)}
 					copy(ifa.IP, sa.Addr[:])
@@ -261,9 +252,7 @@ func interfaceMulticastAddrTable(ifi *Interface) ([]Addr, error) {
 				}
 				switch sa := sa.(type) {
 				case *syscall.SockaddrInet4:
-					ifa := &IPAddr{IP: make(IP, IPv4len)}
-					copy(ifa.IP, sa.Addr[:])
-					ifat = append(ifat, ifa)
+					ifat = append(ifat, &IPAddr{IP: IPv4(sa.Addr[0], sa.Addr[1], sa.Addr[2], sa.Addr[3])})
 				case *syscall.SockaddrInet6:
 					ifa := &IPAddr{IP: make(IP, IPv6len)}
 					copy(ifa.IP, sa.Addr[:])

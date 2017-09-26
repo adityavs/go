@@ -82,13 +82,13 @@ func exceptionhandler(info *exceptionrecord, r *context, gp *g) int32 {
 
 	// Only push runtime·sigpanic if r.ip() != 0.
 	// If r.ip() == 0, probably panicked because of a
-	// call to a nil func.  Not pushing that onto sp will
+	// call to a nil func. Not pushing that onto sp will
 	// make the trace look like a call to runtime·sigpanic instead.
 	// (Otherwise the trace will end at runtime·sigpanic and we
 	// won't get to see who faulted.)
 	if r.ip() != 0 {
 		sp := unsafe.Pointer(r.sp())
-		sp = add(sp, ^uintptr(unsafe.Sizeof(uintptr(0))-1)) // sp--
+		sp = add(sp, ^(unsafe.Sizeof(uintptr(0)) - 1)) // sp--
 		*((*uintptr)(sp)) = r.ip()
 		r.setsp(uintptr(sp))
 	}
@@ -126,11 +126,11 @@ func lastcontinuehandler(info *exceptionrecord, r *context, gp *g) int32 {
 	print("Exception ", hex(info.exceptioncode), " ", hex(info.exceptioninformation[0]), " ", hex(info.exceptioninformation[1]), " ", hex(r.ip()), "\n")
 
 	print("PC=", hex(r.ip()), "\n")
-	if _g_.m.lockedg != nil && _g_.m.ncgo > 0 && gp == _g_.m.g0 {
+	if _g_.m.lockedg != 0 && _g_.m.ncgo > 0 && gp == _g_.m.g0 {
 		if iscgo {
 			print("signal arrived during external code execution\n")
 		}
-		gp = _g_.m.lockedg
+		gp = _g_.m.lockedg.ptr()
 	}
 	print("\n")
 
@@ -155,7 +155,7 @@ func sigpanic() {
 		throw("unexpected signal during runtime execution")
 	}
 
-	switch uint32(g.sig) {
+	switch g.sig {
 	case _EXCEPTION_ACCESS_VIOLATION:
 		if g.sigcode1 < 0x1000 || g.paniconfault {
 			panicmem()
@@ -191,7 +191,7 @@ func setBadSignalMsg() {
 
 // Following are not implemented.
 
-func initsig() {
+func initsig(preinit bool) {
 }
 
 func sigenable(sig uint32) {
@@ -205,8 +205,12 @@ func sigignore(sig uint32) {
 
 func badsignal2()
 
-func raisebadsignal(sig int32) {
+func raisebadsignal(sig uint32) {
 	badsignal2()
+}
+
+func signame(sig uint32) string {
+	return ""
 }
 
 func crash() {

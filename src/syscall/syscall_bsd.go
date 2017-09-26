@@ -33,7 +33,7 @@ func Getgroups() (gids []int, err error) {
 		return nil, nil
 	}
 
-	// Sanity check group count.  Max is 16 on BSD.
+	// Sanity check group count. Max is 16 on BSD.
 	if n < 0 || n > 1000 {
 		return nil, EINVAL
 	}
@@ -507,10 +507,12 @@ func Utimes(path string, tv []Timeval) (err error) {
 }
 
 func UtimesNano(path string, ts []Timespec) error {
-	// TODO: The BSDs can do utimensat with SYS_UTIMENSAT but it
-	// isn't supported by darwin so this uses utimes instead
 	if len(ts) != 2 {
 		return EINVAL
+	}
+	err := utimensat(_AT_FDCWD, path, (*[2]Timespec)(unsafe.Pointer(&ts[0])), 0)
+	if err != ENOSYS {
+		return err
 	}
 	// Not as efficient as it could be because Timespec and
 	// Timeval have different types in the different OSes

@@ -1,5 +1,5 @@
 // Inferno utils/5c/5.out.h
-// http://code.google.com/p/inferno-os/source/browse/utils/5c/5.out.h
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/5c/5.out.h
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -121,9 +121,11 @@ const (
 	C_PSR
 	C_FCR
 
-	C_RCON /* 0xff rotated */
-	C_NCON /* ~RCON */
-	C_SCON /* 0xffff */
+	C_RCON   /* 0xff rotated */
+	C_NCON   /* ~RCON */
+	C_RCON2A /* OR of two disjoint C_RCON constants */
+	C_RCON2S /* subtraction of two disjoint C_RCON constants */
+	C_SCON   /* 0xffff */
 	C_LCON
 	C_LCONADDR
 	C_ZFCON
@@ -228,12 +230,32 @@ const (
 	ASUBD
 	AMULF
 	AMULD
+	ANMULF
+	ANMULD
+	AMULAF
+	AMULAD
+	ANMULAF
+	ANMULAD
+	AMULSF
+	AMULSD
+	ANMULSF
+	ANMULSD
+	AFMULAF
+	AFMULAD
+	AFNMULAF
+	AFNMULAD
+	AFMULSF
+	AFMULSD
+	AFNMULSF
+	AFNMULSD
 	ADIVF
 	ADIVD
 	ASQRTF
 	ASQRTD
 	AABSF
 	AABSD
+	ANEGF
+	ANEGD
 
 	ASRL
 	ASRA
@@ -241,9 +263,12 @@ const (
 	AMULU
 	ADIVU
 	AMUL
+	AMMUL
 	ADIV
 	AMOD
 	AMODU
+	ADIVHW
+	ADIVUHW
 
 	AMOVB
 	AMOVBS
@@ -259,6 +284,9 @@ const (
 	ARFE
 	ASWI
 	AMULA
+	AMULS
+	AMMULA
+	AMMULS
 
 	AWORD
 
@@ -279,11 +307,20 @@ const (
 	APLD
 
 	ACLZ
+	AREV
+	AREV16
+	AREVSH
+	ARBIT
+
+	ABFX
+	ABFXU
 
 	AMULWT
 	AMULWB
+	AMULBB
 	AMULAWT
 	AMULAWB
+	AMULABB
 
 	ADATABUNDLE
 	ADATABUNDLEEND

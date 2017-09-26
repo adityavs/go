@@ -1,11 +1,13 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 // This input was created by taking the ppc64 testcase and modified
 // by hand.
 
-TEXT foo(SB),0,$0
+#include "../../../../../runtime/textflag.h"
+
+TEXT foo(SB),DUPOK|NOSPLIT,$0
 
 //inst:
 //
@@ -37,6 +39,9 @@ TEXT foo(SB),0,$0
 	MOVV	16(R1), R2
 	MOVV	(R1), R2
 
+	LL	(R1), R2 // c0220000
+	LLV	(R1), R2 // d0220000
+
 //	LMOVB rreg ',' rreg
 //	{
 //		outcode(int($1), &$2, 0, &$4);
@@ -66,7 +71,7 @@ TEXT foo(SB),0,$0
 //	{
 //		outcode(int($1), &$2, 0, &$4);
 //	}
-	MOVD	$0.1, F2
+	MOVD	$0.1, F2 // MOVD $(0.10000000000000001), F2
 
 //	LFMOV freg ',' freg
 //	{
@@ -95,6 +100,9 @@ TEXT foo(SB),0,$0
 	MOVV	R1, foo<>+3(SB)
 	MOVV	R1, 16(R2)
 	MOVV	R1, (R2)
+
+	SC	R1, (R2) // e0410000
+	SCV	R1, (R2) // f0410000
 
 //	LMOVB rreg ',' addr
 //	{
@@ -232,20 +240,28 @@ TEXT foo(SB),0,$0
 //	{
 //		outcode(int($1), &nullgen, 0, &$2);
 //	}
+	BEQ	R1, 2(PC)
 label0:
 	JMP	1(PC)
-	JMP	label0+0
-	JAL	1(PC)
-	JAL	label0+0
+	BEQ	R1, 2(PC)
+	JMP	label0+0 // JMP 68
+	BEQ	R1, 2(PC)
+	JAL	1(PC) // CALL 1(PC)
+	BEQ	R1, 2(PC)
+	JAL	label0+0 // CALL 68
 
 //	LBRA addr
 //	{
 //		outcode(int($1), &nullgen, 0, &$2);
 //	}
-	JMP	4(R1)
-	JMP	foo+0(SB)
-	JAL	4(R1)
-	JAL	foo+0(SB)
+	BEQ	R1, 2(PC)
+	JMP	0(R1) // JMP (R1)
+	BEQ	R1, 2(PC)
+	JMP	foo+0(SB) // JMP foo(SB)
+	BEQ	R1, 2(PC)
+	JAL	0(R1) // CALL (R1)
+	BEQ	R1, 2(PC)
+	JAL	foo+0(SB) // CALL foo(SB)
 
 //
 // BEQ/BNE
@@ -256,7 +272,7 @@ label0:
 //	}
 label1:
 	BEQ	R1, 1(PC)
-	BEQ	R1, label1
+	BEQ	R1, label1 // BEQ R1, 83
 
 //	LBRA rreg ',' sreg ',' rel
 //	{
@@ -264,7 +280,7 @@ label1:
 //	}
 label2:
 	BEQ	R1, R2, 1(PC)
-	BEQ	R1, R2, label2
+	BEQ	R1, R2, label2 // BEQ R1, R2, 85
 
 //
 // other integer conditional branch
@@ -275,7 +291,7 @@ label2:
 //	}
 label3:
 	BLTZ	R1, 1(PC)
-	BLTZ	R1, label3
+	BLTZ	R1, label3 // BLTZ R1, 87
 
 //
 // floating point conditional branch
@@ -283,7 +299,7 @@ label3:
 //	LBRA rel
 label4:
 	BFPT	1(PC)
-	BFPT	label4
+	BFPT	label4 // BFPT 89
 
 
 //
@@ -317,8 +333,9 @@ label4:
 //
 // WORD
 //
-	WORD	$1
-	WORD	$foo(SB)
+	WORD	$1	// 00000001
+	NOOP		// 00000000
+	SYNC		// 0000000f
 
 //
 // NOP
@@ -364,7 +381,8 @@ label4:
 //
 	SYSCALL
 	BREAK
-	BREAK	$1, (R1) // overloaded CACHE opcode
+	// overloaded cache opcode:
+	BREAK	R1, (R1)
 
 //
 // RET
@@ -374,12 +392,14 @@ label4:
 //		outcode(int($1), &nullgen, 0, &nullgen);
 //	}
 	SYSCALL
+	BEQ	R1, 2(PC)
 	RET
 
 
 // More JMP/JAL cases, and canonical names JMP, CALL.
 
-	JAL	foo(SB)
+	JAL	foo(SB) // CALL foo(SB)
+	BEQ	R1, 2(PC)
 	JMP	foo(SB)
 	CALL	foo(SB)
 
